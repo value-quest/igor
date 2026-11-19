@@ -745,21 +745,30 @@ services_export() {
 }
 
 # --- update (FrankenPHP suite) ---------------------------------------------------
-# Installs the latest suite release with its own install.sh --versioned and
-# records "<tag> <archive upload time>" in php8.x/.igor-release. The tag is the
-# FrankenPHP version; new PHP patch releases are re-uploaded into the same
-# release, so the upload time is what tells a new build apart.
+# Installs the latest suite release with its own install.sh --versioned.
+# The suite rebuilds and re-uploads its archives daily into a release tagged
+# with the FrankenPHP version, so igor compares versions, not tags or upload
+# times: the release's versions.json ({"frankenphp": "1.13.5", "php85":
+# "8.5.13", ...}) against the installed PHP and php8.x/.igor-release
+# ("tag=v1.13.5 frankenphp=1.13.5 php=8.5.13"; the binary doesn't know its
+# FrankenPHP version). Without versions.json only a new tag counts as an update.
 
 SUITE_REPO="${IGOR_SUITE_REPO:-value-quest/franken-php}"
 
-installed_release() { cat "$PHP_ROOT/php$1/.igor-release" 2>/dev/null || echo unknown; }
-installed_php()     { "$PHP_ROOT/php$1/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || echo "?"; }
+json_get() { plutil -extract "$1" raw -o - - <<< "$2" 2>/dev/null || true; }   # json_get <path> <json>; "" if absent
 
-json_get() { plutil -extract "$1" raw -o - - <<< "$2" 2>/dev/null; }   # json_get <path> <json>
+marker_get() {     # marker_get <8.x> <key>
+    local kv
+    for kv in $(cat "$PHP_ROOT/php$1/.igor-release" 2>/dev/null); do
+        [ "${kv%%=*}" = "$2" ] && { echo "${kv#*=}"; return 0; }
+    done
+    return 0
+}
+installed_php() { "$PHP_ROOT/php$1/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || true; }
 
 cmd_update() {
-    local check=0 force=0 arch json tag n i aname built a v short pending="" tmp b
-    local builds=""   # lines "<short> <upload time>", e.g. "php85 2026-11-19T09:32:58Z"
+    local check=0 force=0 arch json tag n i aname versions="" fp_avail
+    local v short avail inst_php inst_fp pending="" tmp b got shorts=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --check) check=1; shift ;;
@@ -781,28 +790,38 @@ cmd_update() {
     n=$(json_get assets "$json"); n=${n:-0}
     for ((i = 0; i < n; i++)); do
         aname=$(json_get "assets.$i.name" "$json")
-        [[ "$aname" =~ ^frankenphp-darwin-$arch-(php[0-9]+)\.tar\.gz$ ]] || continue
-        builds="$builds${BASH_REMATCH[1]} $(json_get "assets.$i.updated_at" "$json")"$'\n'
+        [[ "$aname" =~ ^frankenphp-darwin-$arch-(php[0-9]+)\.tar\.gz$ ]] && shorts="$shorts ${BASH_REMATCH[1]}"
+        [ "$aname" = versions.json ] && versions=$(curl -fsSL \
+            "https://github.com/$SUITE_REPO/releases/download/$tag/versions.json" || true)
     done
-    [ -n "$builds" ] || die "release $tag has no darwin-$arch builds"
+    [ -n "$shorts" ] || die "release $tag has no darwin-$arch builds"
+    fp_avail=$(json_get frankenphp "$versions")
 
-    echo "Latest suite release: $tag ($SUITE_REPO)"
-    printf '  %-8s %-10s %-34s %s\n' PHP INSTALLED "INSTALLED BUILD" "AVAILABLE BUILD"
-    while read -r short built; do
-        [ -n "$short" ] || continue
+    echo "Latest suite release: $tag ($SUITE_REPO)${fp_avail:+, FrankenPHP $fp_avail}"
+    [ -n "$versions" ] || echo "  (no versions.json in this release - only a new tag counts as an update)"
+    printf '  %-6s %-24s %s\n' PHP INSTALLED AVAILABLE
+    for short in $shorts; do
         v="${short:3:1}.${short:4}"            # php84 -> 8.4
-        if [ -d "$PHP_ROOT/php$v" ]; then
-            a=$(installed_release "$v")
-            printf '  %-8s %-10s %-34s %s\n' "$v" "$(installed_php "$v")" "$a" "$tag $built"
-        else
-            a="not installed"
-            printf '  %-8s %-10s %-34s %s\n' "$v" "-" "$a" "$tag $built"
+        avail=$(json_get "$short" "$versions")
+        inst_php=$(installed_php "$v")
+        inst_fp=$(marker_get "$v" frankenphp)
+        if [ ! -d "$PHP_ROOT/php$v" ]; then
+            printf '  %-6s %-24s %s\n' "$v" "not installed" "${avail:-$tag}"
+            pending="$pending $v"; continue
         fi
-        if [ "$a" != "$tag $built" ] || [ "$force" = 1 ]; then pending="$pending $v"; fi
-    done <<< "$builds"
+        printf '  %-6s %-24s %s\n' "$v" "${inst_php:-?} (FrankenPHP ${inst_fp:-?})" \
+            "${avail:+$avail (FrankenPHP $fp_avail)}${avail:-$tag}"
+        if [ "$force" = 1 ]; then
+            pending="$pending $v"
+        elif [ -n "$avail" ] && [ -n "$fp_avail" ]; then
+            [ "$inst_php" = "$avail" ] && [ "$inst_fp" = "$fp_avail" ] || pending="$pending $v"
+        else
+            [ "$(marker_get "$v" tag)" = "$tag" ] || pending="$pending $v"
+        fi
+    done
 
     if [ -z "$pending" ]; then echo "Up to date."; return 0; fi
-    if [ "$check" = 1 ]; then echo "Run 'igor update' to install PHP$pending from $tag."; return 0; fi
+    if [ "$check" = 1 ]; then echo "Run 'igor update' to install PHP$pending."; return 0; fi
 
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/igor-update.XXXXXX")
     trap 'rm -rf "$tmp"' EXIT
@@ -818,11 +837,14 @@ cmd_update() {
 
         info "PHP $v: installing"
         "$tmp/$short/install.sh" --versioned "$v"
-        "$PHP_ROOT/php$v/bin/php" -v >/dev/null && "$PHP_ROOT/php$v/bin/frankenphp" version >/dev/null ||
+        "$PHP_ROOT/php$v/bin/frankenphp" version >/dev/null && got=$(installed_php "$v") && [ -n "$got" ] ||
             die "PHP $v does not run after the install - the previous version is in $PHP_ROOT/php$v.backup.*"
-        built=$(awk -v s="$short" '$1 == s { print $2 }' <<< "$builds")
-        echo "$tag $built" > "$PHP_ROOT/php$v/.igor-release"
-        echo "  $("$PHP_ROOT/php$v/bin/php" -r 'echo PHP_VERSION;'), $("$PHP_ROOT/php$v/bin/frankenphp" version | cut -d' ' -f1)"
+        avail=$(json_get "$short" "$versions")
+        if [ -n "$avail" ] && [ "$got" != "$avail" ]; then
+            echo "  note: versions.json says $avail, the installed binary is $got (release changed during download?)" >&2
+        fi
+        echo "tag=$tag frankenphp=${fp_avail:-unknown} php=$got" > "$PHP_ROOT/php$v/.igor-release"
+        echo "  PHP $got, FrankenPHP ${fp_avail:-?}"
 
         # keep only the newest backup the installer made
         for b in $(ls -dt "$PHP_ROOT/php$v.backup."* 2>/dev/null | tail -n +2); do

@@ -37,12 +37,14 @@ All projects share these two runtimes. Each project picks one in its `.php-versi
 ### Install and update
 
 ```bash
-igor update --check     # installed PHP and build vs. the latest release
+igor update --check     # installed vs. available PHP and FrankenPHP versions
 igor update             # install/update, then restart everything on the new binaries
 igor update --force     # reinstall even if up to date
 ```
 
-`igor update` asks GitHub for the latest release and downloads `frankenphp-darwin-<arch>-php8x.tar.gz` for every PHP version the release ships. It runs each archive's `install.sh --versioned 8.x`, checks that `php` and `frankenphp` run, and records the build in `~/frankenphp/php8.x/.igor-release`: the release tag plus the archive's upload time. The tag is the FrankenPHP version, and a new PHP patch release (e.g. 8.5.13) is uploaded into the same release again, so igor compares upload times, not just tags. Then it runs `igor refresh --restart`. On a new Mac, run it before `igor setup`.
+`igor update` asks GitHub for the latest release and downloads `frankenphp-darwin-<arch>-php8x.tar.gz` for every PHP version the release ships. It runs each archive's `install.sh --versioned 8.x`, checks that `php` and `frankenphp` run, and records what it installed in `~/frankenphp/php8.x/.igor-release`.
+
+The suite rebuilds its archives every day and replaces them in a release tagged with the FrankenPHP version. So igor compares versions, not tags or dates. The release's `versions.json` (`{"frankenphp": "1.13.5", "php84": "8.4.27", "php85": "8.5.13"}`) is checked against the installed PHP version and the FrankenPHP version in the marker. A daily rebuild with the same versions counts as up to date. A new PHP patch or FrankenPHP version gets installed. Use `--force` to install a rebuild anyway, e.g. after a build fix. Releases without `versions.json` only count as new when their tag changes. Then it runs `igor refresh --restart`. On a new Mac, run it before `igor setup`.
 
 The installer keeps the previous version as `~/frankenphp/php8.x.backup.<date>`, and igor keeps only the newest of those backups. To roll back, move the backup back to `php8.x` and run `igor refresh --restart`.
 
