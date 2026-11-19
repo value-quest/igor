@@ -12,48 +12,47 @@ App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like
 
 ## Contents
 
-- [PHP runtimes (ValueQuest FrankenPHP suite)](#php-runtimes-valuequest-frankenphp-suite)
-  - [Install, update and uninstall](#install-update-and-uninstall)
-  - [Requirements for the darwin build](#requirements-for-the-darwin-build)
-- [Setup (once)](#setup-once)
+- [Install and setup](#install-and-setup)
   - [Trying igor next to Herd](#trying-igor-next-to-herd)
+- [Update](#update)
+  - [New and dropped PHP versions](#new-and-dropped-php-versions)
 - [Daily use](#daily-use)
 - [Workers (Reverb, queues, scheduler, ...)](#workers-reverb-queues-scheduler-)
 - [Services (Redis, Mailpit, S3)](#services-redis-mailpit-s3)
 - [PHP on the command line](#php-on-the-command-line)
+- [PHP runtimes (ValueQuest FrankenPHP suite)](#php-runtimes-valuequest-frankenphp-suite)
+  - [Requirements for the darwin build](#requirements-for-the-darwin-build)
 - [Files](#files)
 - [Notes](#notes)
 
-## PHP runtimes (ValueQuest FrankenPHP suite)
+## Install and setup
 
-igor uses the darwin builds from [value-quest/franken-php](https://github.com/value-quest/franken-php), installed side by side with `--versioned`:
-
-```
-~/frankenphp/php8.4/bin/{frankenphp,php,composer}
-~/frankenphp/php8.5/bin/{frankenphp,php,composer}
-```
-
-All projects share these two runtimes. Each project picks one in its `.php-version`, so a PHP update is a single install, not one per project.
-
-### Install, update and uninstall
+You need macOS with [Homebrew](https://brew.sh). igor itself is a single bash script with no other dependencies.
 
 ```bash
-igor install            # first time: installs every PHP version in the latest release
-igor update             # later: installs new versions, then restarts everything on them
-igor update --check     # installed vs. available PHP and FrankenPHP versions, changes nothing
-igor update --force     # reinstall even if up to date, e.g. after a build fix
-igor uninstall 8.4      # remove a PHP version the suite no longer ships
+# 1. get igor and put it on your PATH
+git clone https://github.com/value-quest/igor.git ~/igor
+ln -s ~/igor/igor ~/bin/igor              # or any folder on your PATH
+
+# 2. install the PHP runtimes (no sudo)
+igor install
+
+# 3. quit Herd if it runs (it holds ports 80/443), then set up DNS, proxy and certificates
+igor setup
+
+# 4. load direnv and the igor PHP commands in your shell
+echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
+echo 'export PATH="$HOME/.igor/bin:$PATH"' >> ~/.zshrc   # last line, after Herd's
+
+# 5. serve your first project
+cd ~/Code/portal && igor add portal       # https://portal.test
 ```
 
-**`igor install`** is the same command as `igor update`, under the name that fits a new Mac. Run it before `igor setup`. It downloads `frankenphp-darwin-<arch>-php8x.tar.gz` for every PHP version in the latest release and runs each archive's `install.sh --versioned 8.x`. It checks that `php` and `frankenphp` run and records what it installed in `~/frankenphp/php8.x/.igor-release`.
+**`igor install`** downloads the latest [FrankenPHP suite](#php-runtimes-valuequest-frankenphp-suite) release for every PHP version it ships (currently 8.4 and 8.5) into `~/frankenphp/php8.x`. It runs each archive's own `install.sh --versioned 8.x` and checks that `php` and `frankenphp` start. Run it as your normal user, without sudo.
 
-**`igor update`** does the same, then runs `igor refresh --restart`, so the proxy, sites, workers and services restart on the new binaries. It installs only what changed. The suite rebuilds its archives every day into a release tagged with the FrankenPHP version, so igor compares versions instead of tags or dates. The versions come from the release's `versions.json` (`{"frankenphp": "1.13.5", "php84": "8.4.28", "php85": "8.5.13"}`). A daily rebuild with the same versions counts as up to date; a new PHP patch or FrankenPHP version gets installed. When the suite adds a minor version (e.g. 8.6), `update` installs it next to the others. Runtimes installed by hand show as `?` until their first `igor update`.
+**`igor setup`** installs dnsmasq and direnv through Homebrew. It points `*.test` to 127.0.0.1, starts the front proxy as a LaunchAgent, puts the Caddy local CA into the macOS keychain and creates the `php`/`php84`/`php85` commands in `~/.igor/bin`. It asks for sudo for dnsmasq (port 53) and for `/etc/resolver/test`.
 
-**`igor uninstall <8.x>`** removes `~/frankenphp/php8.x` and its backups after you confirm (`--yes` skips the question). It refuses while a site still uses that version, so switch those projects first: change their `.php-version` and run `igor refresh`. It also refuses to remove the last runtime, which the front proxy needs. Afterwards it runs `igor refresh`, so the proxy and the `php8x` shims move to the remaining versions. `igor update --check` lists installed versions the suite no longer ships.
-
-The installer keeps the previous version as `~/frankenphp/php8.x.backup.<date>`, and igor keeps only the newest backup. To roll back, move the backup back to `php8.x` and run `igor refresh --restart`.
-
-<details><summary>Manual install (what <code>igor install</code> does)</summary>
+<details><summary>Installing the PHP runtimes by hand (what <code>igor install</code> does)</summary>
 
 Run it as your normal user, **without sudo**. Always use `--versioned` on macOS: the normal install writes to `~/bin` and `~/.bash_profile` and looks for running servers through `/proc`, which macOS doesn't have.
 
@@ -71,22 +70,6 @@ done
 
 </details>
 
-### Requirements for the darwin build
-
-Each binary must run straight from its folder. On macOS that means dylibs in `../lib`, found through an `@executable_path/../lib` rpath, instead of the `LD_LIBRARY_PATH` wrappers used on Linux. igor never calls a binary from a project folder.
-
-## Setup (once)
-
-```bash
-cp igor ~/bin/ && chmod +x ~/bin/igor     # or anywhere on PATH
-igor install                              # PHP runtimes, see above
-# quit Herd first (it holds ports 80/443)
-igor setup
-echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
-```
-
-`setup` installs dnsmasq and direnv through Homebrew. It points `*.test` to 127.0.0.1, starts the front proxy as a LaunchAgent, and puts the Caddy local CA into the macOS keychain. It asks for sudo for dnsmasq (port 53) and for `/etc/resolver/test`.
-
 ### Trying igor next to Herd
 
 igor and Herd both need ports 80/443, so only one of them can run at a time:
@@ -98,6 +81,33 @@ igor start    # quit Herd first; igor refuses to start while 80/443 are taken
 ```
 
 Your sites, configs and service data stay as they are in between. dnsmasq keeps running; it sends `*.test` to 127.0.0.1 for igor and Herd alike.
+
+## Update
+
+```bash
+igor update --check     # installed vs. available PHP and FrankenPHP versions, changes nothing
+igor update             # install what's new, then restart everything on it
+igor update --force     # reinstall even if up to date, e.g. after a build fix
+git -C ~/igor pull      # igor itself
+```
+
+**`igor update`** compares your runtimes with the latest suite release, installs only what changed and then runs `igor refresh --restart`. That restarts the proxy, sites, workers and services on the new binaries. It's the same command as `igor install`; only the name differs.
+
+The suite rebuilds its archives every day into a release tagged with the FrankenPHP version, so igor compares versions instead of tags or dates. The versions come from the release's `versions.json` (`{"frankenphp": "1.13.5", "php84": "8.4.28", "php85": "8.5.13"}`). A daily rebuild with the same versions counts as up to date; a new PHP patch or FrankenPHP version gets installed. igor records what it installed in `~/frankenphp/php8.x/.igor-release`. Runtimes installed by hand show as `?` until their first `igor update`.
+
+The installer keeps the previous version as `~/frankenphp/php8.x.backup.<date>`, and igor keeps only the newest backup. To roll back, move the backup back to `php8.x` and run `igor refresh --restart`.
+
+### New and dropped PHP versions
+
+When the suite adds a minor version (e.g. 8.6), `igor update` installs it next to the others. Switch a project by changing its `.php-version` and running `igor refresh`.
+
+When the suite drops a version, `igor update --check` lists it as "no longer in the release". Move its projects to another version, then remove it:
+
+```bash
+igor uninstall 8.4      # asks first; --yes skips the question
+```
+
+`uninstall` deletes `~/frankenphp/php8.4` and its backups. It refuses while a site still uses that version, and it won't remove the last runtime, which the front proxy needs. Afterwards it runs `igor refresh`, so the proxy and the `php8x` commands move to the remaining versions.
 
 ## Daily use
 
@@ -188,7 +198,22 @@ They work in any folder: no direnv and no `igor add` needed. Put `~/.igor/bin` f
 export PATH="$HOME/.igor/bin:$PATH"
 ```
 
-Run `igor shims` again after you install or remove a runtime, so the numbered commands match.
+`igor update`, `igor uninstall` and `igor refresh` keep the numbered commands in sync with the installed runtimes.
+
+## PHP runtimes (ValueQuest FrankenPHP suite)
+
+igor uses the darwin builds from [value-quest/franken-php](https://github.com/value-quest/franken-php), installed side by side with `--versioned`:
+
+```
+~/frankenphp/php8.4/bin/{frankenphp,php,composer}
+~/frankenphp/php8.5/bin/{frankenphp,php,composer}
+```
+
+All projects share these two runtimes. Each project picks one in its `.php-version`, so a PHP update is a single install, not one per project.
+
+### Requirements for the darwin build
+
+Each binary must run straight from its folder. On macOS that means dylibs in `../lib`, found through an `@executable_path/../lib` rpath, instead of the `LD_LIBRARY_PATH` wrappers used on Linux. igor never calls a binary from a project folder.
 
 ## Files
 
