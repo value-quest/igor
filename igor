@@ -809,8 +809,8 @@ cmd_update() {
             printf '  %-6s %-24s %s\n' "$v" "not installed" "${avail:-$tag}"
             pending="$pending $v"; continue
         fi
-        printf '  %-6s %-24s %s\n' "$v" "${inst_php:-?} (FrankenPHP ${inst_fp:-?})" \
-            "${avail:+$avail (FrankenPHP $fp_avail)}${avail:-$tag}"
+        if [ -n "$avail" ]; then b="$avail (FrankenPHP $fp_avail)"; else b=$tag; fi
+        printf '  %-6s %-24s %s\n' "$v" "${inst_php:-?} (FrankenPHP ${inst_fp:-?})" "$b"
         if [ "$force" = 1 ]; then
             pending="$pending $v"
         elif [ -n "$avail" ] && [ -n "$fp_avail" ]; then
