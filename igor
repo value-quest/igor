@@ -828,18 +828,18 @@ cmd_update() {
 
     echo "Latest suite release: $tag ($SUITE_REPO)${fp_avail:+, FrankenPHP $fp_avail}"
     [ -n "$versions" ] || echo "  (no versions.json in this release - only a new tag counts as an update)"
-    printf '  %-6s %-24s %s\n' PHP INSTALLED AVAILABLE
+    printf '  %-6s %-28s %s\n' PHP INSTALLED AVAILABLE
     for short in $shorts; do
         v="${short:3:1}.${short:4}"            # php84 -> 8.4
         avail=$(json_get "$short" "$versions")
         inst_php=$(installed_php "$v")
         inst_fp=$(marker_get "$v" frankenphp)
         if [ ! -d "$PHP_ROOT/php$v" ]; then
-            printf '  %-6s %-24s %s\n' "$v" "not installed" "${avail:-$tag}"
+            printf '  %-6s %-28s %s\n' "$v" "not installed" "${avail:-$tag}"
             pending="$pending $v"; continue
         fi
         if [ -n "$avail" ]; then b="$avail (FrankenPHP $fp_avail)"; else b=$tag; fi
-        printf '  %-6s %-24s %s\n' "$v" "${inst_php:-?} (FrankenPHP ${inst_fp:-?})" "$b"
+        printf '  %-6s %-28s %s\n' "$v" "${inst_php:-?} (FrankenPHP ${inst_fp:-?})" "$b"
         if [ "$force" = 1 ]; then
             pending="$pending $v"
         elif [ -n "$avail" ] && [ -n "$fp_avail" ]; then
@@ -853,7 +853,9 @@ cmd_update() {
     if [ "$check" = 1 ]; then echo "Run 'igor update' to install PHP$pending."; return 0; fi
 
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/igor-update.XXXXXX")
-    trap 'rm -rf "$tmp"' EXIT
+    # expand $tmp now: the EXIT trap runs after cmd_update's locals are gone
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" EXIT
     for v in $pending; do
         short="php${v/./}"
         info "PHP $v: downloading $tag"
