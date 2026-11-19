@@ -1,8 +1,8 @@
 # igor
 
-_Frankenstein's assistant: it serves your Laravel projects through FrankenPHP so you don't have to._
+_Frankenstein's assistant: it serves your PHP projects through FrankenPHP so you don't have to._
 
-Local Laravel sites on macOS with the ValueQuest FrankenPHP suite. It replaces Herd and with a central Caddy proxy in front of one FrankenPHP backend per app.
+Local PHP sites on macOS with the ValueQuest FrankenPHP suite: Laravel, Symfony, WordPress or plain PHP. It replaces Herd with a central Caddy proxy in front of one FrankenPHP backend per app.
 
 ```
 Browser ──https://app.test──▶ front proxy (Caddy local CA, :80/:443)
@@ -97,8 +97,9 @@ Your sites, configs and service data stay as they are in between. dnsmasq keeps 
 ## Daily use
 
 ```bash
-cd ~/Code/portal && igor add              # https://portal.test, newest PHP
+cd ~/Code/portal && igor add portal       # https://portal.test, newest PHP
 cd ~/Code/sso    && igor add sso --php 8.4
+cd ~/Code/blog   && igor add blog --docroot .   # WordPress: serve the project folder itself
 igor proxy reverb 8080                    # route to a service you run yourself
 igor service add redis -- redis-server    # background service, see below
 igor list
@@ -108,6 +109,8 @@ igor workers                              # sync Procfile.dev workers
 igor refresh                              # regenerate everything, restart what changed
 igor info sso                             # internal URL + .env hints
 ```
+
+`add` serves `public/` if the project has one (Laravel, Symfony, Slim, ...) and the project folder itself otherwise. For anything else, pass `--docroot` with a folder inside the project, e.g. `--docroot web`. Requests for files that don't exist go to the document root's `index.php`, which is what front controllers and WordPress permalinks need. To change the document root, run `igor rm <name>` and add the site again.
 
 `add` writes `.php-version` and an `.envrc`. Inside the project, `php`, `composer` and `frankenphp` then come from the shared runtime, and that includes Claude Code when you start it there. To switch a project's PHP version, edit `.php-version`, then run `igor refresh`.
 
@@ -220,7 +223,7 @@ Run `igor shims` again after you install or remove a runtime, so the numbered co
 ## Notes
 
 - Everything igor runs starts at login. `igor stop <name>` stops a site, worker or service and keeps it stopped after a restart of the Mac, until `igor start <name>`. An idle FrankenPHP server uses a few tens of MB.
-- PHP sees every request as HTTPS (`HTTPS=on`), so Laravel generates `https://` URLs and assets behind the front proxy without trusting any proxy. That includes direct calls to `http://127.0.0.1:<port>`. The client IP is still `127.0.0.1`.
+- PHP sees every request as HTTPS (`HTTPS=on`), so Laravel, Symfony and WordPress generate `https://` URLs and assets behind the front proxy without trusting any proxy. That includes direct calls to `http://127.0.0.1:<port>`. The client IP is still `127.0.0.1`.
 - Logs are not rotated. `igor logs --clear <name>` empties one (`portal:queue` for a worker), `igor logs --clear` all of them. Running services keep logging into the emptied file.
 - The front proxy listens on all interfaces, so sites are reachable from your LAN unless the macOS firewall blocks them. Binding only to 127.0.0.1 on ports 80/443 needs root on macOS.
 - The script targets the bash 3.2 that ships with macOS and needs nothing else.

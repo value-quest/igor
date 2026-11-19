@@ -1,5 +1,6 @@
 #!/bin/bash
-# igor - local Laravel sites on macOS with the ValueQuest FrankenPHP suite.
+# igor - local PHP sites (Laravel, Symfony, WordPress, ...) on macOS with the
+# ValueQuest FrankenPHP suite.
 #
 #   Browser  -> https://<name>.test  (front proxy, Caddy local CA, ports 80/443)
 #            -> http://127.0.0.1:<port>  (one FrankenPHP server per site, HTTPS=on)
@@ -19,7 +20,7 @@ TLD="${IGOR_TLD:-test}"
 FIRST_PORT=8101
 LABEL_PREFIX="dev.igor"
 AGENTS="$HOME/Library/LaunchAgents"
-REGISTRY="$IGOR_HOME/sites.tsv"      # name <TAB> port <TAB> type <TAB> php <TAB> dir
+REGISTRY="$IGOR_HOME/sites.tsv"      # name <TAB> port <TAB> type <TAB> php <TAB> dir [<TAB> docroot]
 CADDYFILE="$IGOR_HOME/Caddyfile"
 SITES_DIR="$IGOR_HOME/sites"          # front proxy routes (imported by the proxy)
 BACKENDS_DIR="$IGOR_HOME/backends"    # one FrankenPHP Caddyfile per site
@@ -35,7 +36,7 @@ usage() {
 Usage: igor <command> [args]
 
   setup                     one-time: dnsmasq for *.$TLD, front proxy, local CA
-  add <name> [--php 8.x] [--port N]
+  add <name> [--php 8.x] [--port N] [--docroot DIR]
                             serve the current project as https://<name>.$TLD
                             (e.g. 'igor add portal.valuequest')
   proxy <name> <port>       route https://<name>.$TLD to a service you run
@@ -105,8 +106,16 @@ registry_get() {   # registry_get <name> -> the line, or nothing
     awk -F'\t' -v n="$1" '$1 == n' "$REGISTRY"
 }
 
-registry_field() { # registry_field <name> <column 1-5>
+registry_field() { # registry_field <name> <column 1-6>
     registry_get "$1" | cut -f"$2"
+}
+
+site_docroot() {   # absolute document root of a site (column 6, default public)
+    local dir rel
+    dir=$(registry_field "$1" 5)
+    rel=$(registry_field "$1" 6)
+    rel=${rel:-public}
+    if [ "$rel" = . ]; then echo "$dir"; else echo "$dir/$rel"; fi
 }
 
 next_port() {
@@ -328,7 +337,7 @@ write_backend() {
 
 http://:$port {
 	bind 127.0.0.1
-	root * "$dir/public"
+	root * "$(site_docroot "$name")"
 	php_server {
 		env HTTPS on
 	}
@@ -443,22 +452,31 @@ EOF
 }
 
 cmd_add() {
-    local name="" php="" port="" dir
+    local name="" php="" port="" docroot="" dir
     dir=$(pwd)
     while [ $# -gt 0 ]; do
         case "$1" in
-            --php)  php=${2:-}; shift 2 ;;
-            --port) port=${2:-}; shift 2 ;;
+            --php)     php=${2:-}; shift 2 ;;
+            --port)    port=${2:-}; shift 2 ;;
+            --docroot) docroot=${2:-}; shift 2 ;;
             -*)     die "unknown option $1" ;;
             *)      [ -z "$name" ] || die "unexpected argument '$1'"; name=$1; shift ;;
         esac
     done
-    [ -n "$name" ] || die "usage: igor add <name> [--php 8.x] [--port N]  (e.g. igor add portal.valuequest)"
+    [ -n "$name" ] || die "usage: igor add <name> [--php 8.x] [--port N] [--docroot DIR]  (e.g. igor add portal.valuequest)"
     name=${name%.$TLD}   # accept 'portal.valuequest.test' too
     check_name "$name"
     [ -f "$CADDYFILE" ] || die "run 'igor setup' first"
     [ -z "$(registry_get "$name")" ] || die "'$name' already exists (igor rm $name)"
-    [ -d "$dir/public" ] || die "no public/ in $dir - run this in the project root"
+    # document root, relative to the project: --docroot, else public/ if
+    # there is one (Laravel, Symfony, ...), else the project itself (WordPress)
+    if [ -z "$docroot" ]; then
+        if [ -d "$dir/public" ]; then docroot=public; else docroot=.; fi
+    fi
+    docroot=${docroot%/}; docroot=${docroot#./}; docroot=${docroot:-.}
+    [[ "$docroot" != /* && "$docroot" != ..* && "$docroot" != */..* ]] ||
+        die "--docroot must be a folder inside the project (e.g. public, web, .)"
+    [ -d "$dir/$docroot" ] || die "no $docroot/ in $dir - run this in the project root"
     local existing
     existing=$(awk -F'\t' -v d="$dir" '$5 == d { print $1 }' "$REGISTRY" 2>/dev/null || true)
     [ -z "$existing" ] || die "this folder is already served as '$existing'"
@@ -484,7 +502,7 @@ EOF
         command -v direnv >/dev/null && (cd "$dir" && direnv allow)
     fi
 
-    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$port" php "$php" "$dir" >> "$REGISTRY"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$port" php "$php" "$dir" "$docroot" >> "$REGISTRY"
     write_site "$name"
     write_route "$name" "$port"
     agent_start "$name"
@@ -495,7 +513,7 @@ EOF
     fi
 
     cat <<EOF
-https://$name.$TLD  ->  http://127.0.0.1:$port  (PHP $php)
+https://$name.$TLD  ->  http://127.0.0.1:$port  (PHP $php, serving $docroot/)
 Pinned in .php-version - add .php-version and .envrc to git if the team should share it.
 EOF
 }
@@ -622,7 +640,7 @@ cmd_refresh() {
     # read the registry up front: the loop rewrites it
     local entries
     entries=$(cat "$REGISTRY")
-    while IFS=$'\t' read -r name port type php dir <&3; do
+    while IFS=$'\t' read -r name port type php dir _ <&3; do
         [ -n "$name" ] || continue
         case "$type" in
             php)
@@ -925,8 +943,8 @@ cmd_restart() { control restart "$@"; }
 cmd_list() {
     [ -s "$REGISTRY" ] || { echo "Nothing yet - run 'igor add <name>' in a project."; return 0; }
     printf '%-28s %-6s %-6s %-8s %s\n' NAME PORT PHP STATE DIR
-    local name port type php dir state w
-    while IFS=$'\t' read -r name port type php dir; do
+    local name port type php dir docroot state w
+    while IFS=$'\t' read -r name port type php dir docroot; do
         if [ "$type" = proxy ]; then
             state=$(port_in_use "$port" && echo up || echo down)
         elif [ "$type" = service ]; then
@@ -935,6 +953,7 @@ cmd_list() {
         else
             state=$(is_running "$name" && echo running || echo stopped)
         fi
+        [ "$type" != php ] || [ "${docroot:-public}" = public ] || dir="$dir  (docroot: $docroot)"
         printf '%-28s %-6s %-6s %-8s %s\n' "$name" "$port" "$php" "$state" "$dir"
         [ "$type" = php ] || continue
         for w in $(site_workers "$name"); do
@@ -990,7 +1009,7 @@ cmd_info() {
 Browser:   https://$name.$TLD
 Internal:  http://127.0.0.1:$port     (server-to-server, no TLS)
 
-.env hints for apps talking to '$name':
+.env hints for apps talking to '$name' (Laravel-style examples):
   # SSO: browser redirects public, back-channel internal
   SSO_URL=https://$name.$TLD
   SSO_INTERNAL_URL=http://127.0.0.1:$port
