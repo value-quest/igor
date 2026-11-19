@@ -13,6 +13,7 @@
 set -euo pipefail
 
 IGOR_HOME="${IGOR_HOME:-$HOME/.igor}"
+IGOR_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # this repo (services.conf)
 PHP_ROOT="${IGOR_PHP_ROOT:-$HOME/frankenphp}"
 TLD="${IGOR_TLD:-test}"
 FIRST_PORT=8101
@@ -44,6 +45,11 @@ Usage: igor <command> [args]
                             in $IGOR_HOME/data/<name>; --route PORT also serves
                             its web UI as https://<name>.$TLD. Run it again to
                             change the command.
+  services [--prune] [<file>]
+                            add/update every service in a services file
+                            (default: services.conf next to igor); --prune
+                            removes services not listed
+  services --export         print the current services in that format
   rm <name>                 remove a site, service or route (project files and
                             service data are not touched)
   workers [<name>]          start the site's Procfile.dev processes (reverb,
@@ -647,6 +653,94 @@ cmd_refresh() {
     cmd_list
 }
 
+# --- services file -----------------------------------------------------------
+# One service per line, in 'igor service add' form without the prefix:
+#   <name> [--route PORT] [--env KEY=VALUE]... -- <command...>
+# Words are split on whitespace (no quoting); a leading ~/ becomes $HOME/.
+
+services_usage() {
+    die "usage: igor services [--prune] [<file>]   apply a services file
+       igor services --export              print the current services in that format"
+}
+
+cmd_services() {
+    local prune=0 export=0 file=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --prune)  prune=1; shift ;;
+            --export) export=1; shift ;;
+            -h|--help) services_usage ;;
+            -*)       die "unknown option $1" ;;
+            *)        [ -z "$file" ] || services_usage; file=$1; shift ;;
+        esac
+    done
+    if [ "$export" = 1 ]; then services_export; return 0; fi
+
+    [ -n "$file" ] || file="$IGOR_DIR/services.conf"
+    [ -f "$file" ] || die "no services file at $file (create one with: igor services --export > $file)"
+    [ -f "$CADDYFILE" ] || die "run 'igor setup' first"
+
+    local line words w i listed="" failed=""
+    while IFS= read -r line <&3 || [ -n "$line" ]; do
+        line=${line%$'\r'}
+        [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+        read -ra words <<< "$line"
+        for i in "${!words[@]}"; do
+            w=${words[$i]}
+            [[ "$w" == "~/"* ]] && words[$i]="$HOME/${w#\~/}"
+        done
+        info "${words[0]}"
+        listed="$listed ${words[0]} "
+        # its own igor process, so one broken service doesn't stop the others
+        # (and set -e still applies, unlike in a subshell under ||)
+        bash "${BASH_SOURCE[0]}" service add "${words[@]}" || failed="$failed ${words[0]}"
+    done 3< "$file"
+
+    if [ "$prune" = 1 ]; then
+        local name
+        for name in $(awk -F'\t' '$3 == "service" { print $1 }' "$REGISTRY"); do
+            case "$listed" in
+                *" $name "*) ;;
+                *) info "$name (not in $file)"; cmd_rm "$name" ;;
+            esac
+        done
+    fi
+
+    [ -z "$failed" ] || die "not running:$failed - see the logs above"
+}
+
+services_export() {
+    local name route p n arg out kv
+    echo "# igor services - apply with: igor services [<file>]"
+    echo "# <name> [--route PORT] [--env KEY=VALUE]... -- <command...>"
+    for name in $(awk -F'\t' '$3 == "service" { print $1 }' "$REGISTRY" 2>/dev/null); do
+        p=$(plist "$name")
+        [ -f "$p" ] || { echo "# $name: no LaunchAgent - skipped"; continue; }
+        out=$name
+        route=$(registry_field "$name" 2)
+        [ "$route" = - ] || out="$out --route $route"
+        while IFS= read -r kv; do
+            [[ "$kv" =~ ^[[:space:]]+([^[:space:]]+)\ =\ (.*)$ ]] || continue
+            case "${BASH_REMATCH[1]}" in PATH|HOME|PHP_INI_SCAN_DIR) continue ;; esac
+            [[ "${BASH_REMATCH[2]}" != *[[:space:]]* ]] ||
+                echo "# warning: $name: ${BASH_REMATCH[1]} contains spaces, which this format can't express" >&2
+            out="$out --env ${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+        done < <(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables" "$p" 2>/dev/null)
+        out="$out --"
+        n=0
+        while arg=$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:$n" "$p" 2>/dev/null); do
+            if [ "$n" = 0 ]; then
+                case "$arg" in /opt/homebrew/bin/*|/usr/local/bin/*) arg=${arg##*/} ;; esac
+            fi
+            [[ "$arg" == "$HOME/"* ]] && arg="~/${arg#"$HOME"/}"
+            [[ "$arg" != *[[:space:]]* ]] || echo "# warning: '$arg' contains spaces, which this format can't express" >&2
+            out="$out $arg"
+            n=$((n + 1))
+        done
+        echo "$out"
+    done
+}
+
 # --- workers (Procfile.dev) --------------------------------------------------
 # A worker is a launchd agent named "<site>@<worker>"; users write <site>:<worker>.
 
@@ -884,6 +978,7 @@ case "${1:-}" in
     workers) shift; cmd_workers "$@" ;;
     refresh) shift; cmd_refresh "$@" ;;
     service) shift; cmd_service "$@" ;;
+    services) shift; cmd_services "$@" ;;
     -h|--help|help|"") usage ;;
     *) usage; exit 1 ;;
 esac

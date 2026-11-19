@@ -141,6 +141,28 @@ igor service add s3 --route 9001 --env MINIO_ROOT_USER=admin --env MINIO_ROOT_PA
 - To change a command, run `igor service add` again with the same name. igor restarts the service only if something changed.
 - `igor start|stop|restart|logs|info <name>` work as for sites. `igor rm <name>` removes the service and keeps its data.
 
+### Services file
+
+Keep the service list in `services.conf` next to `igor`, so another Mac gets the same services with one command. The file is in `.gitignore` because it can hold credentials, so share it privately rather than through this public repo:
+
+```bash
+igor services --export > services.conf   # write the file from what runs now
+igor services                            # add/update everything in services.conf
+igor services --prune                    # ... and remove services that aren't listed
+igor services ~/other/services.conf      # use another file
+```
+
+One service per line, written like `igor service add` without the `igor service add` prefix:
+
+```
+# <name> [--route PORT] [--env KEY=VALUE]... -- <command...>
+redis -- redis-server --port 6379
+mail --route 8025 -- mailpit --smtp 127.0.0.1:2525 --listen 127.0.0.1:8025 --database mailpit.db
+s3 --route 9001 --env MINIO_ROOT_USER=admin --env MINIO_ROOT_PASSWORD=password -- ~/bin/silo server . --address 127.0.0.1:9000 --console-address 127.0.0.1:9001
+```
+
+Words are split on spaces, with no quoting, and `~/` means your home folder. Unchanged services are left alone. A service that fails to start is reported, and the others still get set up. The file holds the `--env` values in plain text.
+
 Apps connect directly, without the proxy:
 
 ```dotenv
@@ -176,6 +198,7 @@ Run `igor shims` again after you install or remove a runtime, so the numbered co
 | `~/.igor/Caddyfile`, `~/.igor/sites/*.caddy` | front proxy config, one route per site |
 | `~/.igor/backends/*.Caddyfile` | generated FrankenPHP config per site (sets `HTTPS=on` for PHP) |
 | `~/.igor/php/99-igor.ini` | shared php.ini settings (web and CLI, via `PHP_INI_SCAN_DIR`) |
+| `services.conf` (next to `igor`, not in git) | the service list for `igor services` |
 | `~/.igor/data/<service>/` | working folder and data of each service |
 | `~/.igor/logs/` | one log per site and per worker (`<site>@<worker>.log`), plus `proxy.log` |
 | `~/Library/LaunchAgents/dev.igor.*.plist` | LaunchAgents for the proxy, sites and workers (`<site>@<worker>`): start at login, restart if they crash |
