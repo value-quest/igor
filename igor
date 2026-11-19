@@ -1,0 +1,466 @@
+#!/bin/bash
+# igor - local Laravel sites on macOS with the ValueQuest FrankenPHP suite.
+#
+#   Browser  -> https://<name>.test  (front proxy, Caddy local CA, ports 80/443)
+#            -> http://127.0.0.1:<port>  (one FrankenPHP php-server per site)
+#   App-to-app calls go straight to http://127.0.0.1:<port>, no TLS.
+#
+# PHP runtimes are shared: ~/frankenphp/php8.x/bin (suite, --versioned install).
+# Each project pins its version in .php-version; direnv puts that bin/ on PATH.
+#
+# Written for the bash 3.2 that ships with macOS.
+
+set -euo pipefail
+
+IGOR_HOME="${IGOR_HOME:-$HOME/.igor}"
+PHP_ROOT="${IGOR_PHP_ROOT:-$HOME/frankenphp}"
+TLD="${IGOR_TLD:-test}"
+FIRST_PORT=8101
+LABEL_PREFIX="dev.igor"
+AGENTS="$HOME/Library/LaunchAgents"
+REGISTRY="$IGOR_HOME/sites.tsv"      # name <TAB> port <TAB> type <TAB> php <TAB> dir
+CADDYFILE="$IGOR_HOME/Caddyfile"
+SITES_DIR="$IGOR_HOME/sites"
+SHIM_DIR="$IGOR_HOME/bin"
+LOGS="$IGOR_HOME/logs"
+INI_DIR="$IGOR_HOME/php"
+
+die()  { echo "igor: $*" >&2; exit 1; }
+info() { echo "==> $*"; }
+
+usage() {
+    cat <<EOF
+Usage: igor <command> [args]
+
+  setup                     one-time: dnsmasq for *.$TLD, front proxy, local CA
+  add <name> [--php 8.x] [--port N]
+                            serve the current project as https://<name>.$TLD
+                            (e.g. 'igor add portal.valuequest')
+  proxy <name> <port>       route https://<name>.$TLD to a service you run
+                            yourself (Reverb, Mailpit UI, Vite, ...)
+  rm <name>                 remove a site (project files are not touched)
+  start|stop|restart <name> control a site's FrankenPHP server
+  list                      all sites with port, PHP version and state
+  logs <name>               follow a site's log (use "proxy" for the front proxy)
+  info <name>               URLs and .env hints for internal access
+  reload                    reload the front proxy config
+  shims                     (re)create php/composer/frankenphp shims in
+                            $IGOR_HOME/bin, plus php84, composer85, ... per
+                            installed version (rerun after installing one)
+EOF
+}
+
+# --- helpers ---------------------------------------------------------------
+
+installed_versions() {
+    # newest first, e.g. "8.5 8.4"
+    # (skips the installer's php8.x.backup.<date> folders)
+    ls -d "$PHP_ROOT"/php8.* 2>/dev/null | sed 's|.*/php||' | grep -E '^[0-9]+\.[0-9]+$' |
+        sort -t. -k1,1nr -k2,2nr || true
+}
+
+php_bin() { echo "$PHP_ROOT/php$1/bin"; }
+
+newest_php() {
+    local v
+    v=$(installed_versions | head -1)
+    [ -n "$v" ] || die "no PHP runtime in $PHP_ROOT (install the suite with ./install.sh --versioned 8.x)"
+    echo "$v"
+}
+
+check_name() {
+    local label='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
+    [[ "$1" =~ ^$label(\.$label)*$ ]] ||
+        die "invalid name '$1' (lowercase letters, digits, dashes; dots between parts)"
+}
+
+registry_get() {   # registry_get <name> -> the line, or nothing
+    [ -f "$REGISTRY" ] || return 0
+    awk -F'\t' -v n="$1" '$1 == n' "$REGISTRY"
+}
+
+registry_field() { # registry_field <name> <column 1-5>
+    registry_get "$1" | cut -f"$2"
+}
+
+next_port() {
+    local max
+    max=$( { [ -f "$REGISTRY" ] && cut -f2 "$REGISTRY"; echo $((FIRST_PORT - 1)); } | sort -n | tail -1)
+    echo $((max + 1))
+}
+
+port_in_use() {
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+label()  { echo "$LABEL_PREFIX.$1"; }
+plist()  { echo "$AGENTS/$(label "$1").plist"; }
+domain() { echo "gui/$(id -u)"; }
+
+is_running() {
+    launchctl print "$(domain)/$(label "$1")" >/dev/null 2>&1
+}
+
+xml_escape() {
+    sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' <<< "$1"
+}
+
+# write_plist <name> <workdir> <PATH> <args...>
+write_plist() {
+    local name=$1 workdir=$2 path=$3 arg
+    shift 3
+    mkdir -p "$AGENTS" "$LOGS"
+    {
+        cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$(label "$name")</string>
+  <key>ProgramArguments</key>
+  <array>
+EOF
+        for arg in "$@"; do
+            echo "    <string>$(xml_escape "$arg")</string>"
+        done
+        cat <<EOF
+  </array>
+  <key>WorkingDirectory</key><string>$(xml_escape "$workdir")</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$(xml_escape "$path")</string>
+    <key>PHP_INI_SCAN_DIR</key><string>$(xml_escape "$INI_DIR")</string>
+    <key>HOME</key><string>$(xml_escape "$HOME")</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>$(xml_escape "$LOGS/$name.log")</string>
+  <key>StandardErrorPath</key><string>$(xml_escape "$LOGS/$name.log")</string>
+</dict>
+</plist>
+EOF
+    } > "$(plist "$name")"
+}
+
+agent_start() {
+    is_running "$1" && return 0
+    launchctl bootstrap "$(domain)" "$(plist "$1")"
+}
+
+agent_stop() {
+    is_running "$1" || return 0
+    launchctl bootout "$(domain)/$(label "$1")" 2>/dev/null || true
+}
+
+# --- CLI shims ---------------------------------------------------------------
+
+cmd_shims() {
+    mkdir -p "$SHIM_DIR"
+    cat > "$SHIM_DIR/igor-shim" <<'EOF'
+#!/bin/bash
+# igor shim - php, composer, frankenphp from the shared FrankenPHP runtimes.
+#   php84, composer85, frankenphp84 ...  fixed version
+#   php, composer, frankenphp            nearest .php-version from $PWD upwards,
+#                                        else the newest installed runtime
+set -eu
+PHP_ROOT="${IGOR_PHP_ROOT:-$HOME/frankenphp}"
+name=$(basename "$0")
+tool=${name%%[0-9]*}
+digits=${name#"$tool"}
+v="" from=""
+
+if [ -n "$digits" ]; then
+    v="${digits:0:1}.${digits:1}"
+else
+    d=$PWD
+    while :; do
+        if [ -f "$d/.php-version" ]; then
+            from="$d/.php-version"
+            v=$(tr -d '[:space:]' < "$from" | sed -E 's/^php//; s/^([0-9]+\.[0-9]+).*/\1/')
+            break
+        fi
+        [ "$d" = / ] && break
+        d=$(dirname "$d")
+    done
+    if [ -z "$v" ]; then
+        v=$(ls -d "$PHP_ROOT"/php8.* 2>/dev/null | sed 's|.*/php||' | grep -E '^[0-9]+\.[0-9]+$' |
+            sort -t. -k1,1nr -k2,2nr | head -1 || true)
+    fi
+fi
+
+bin="$PHP_ROOT/php$v/bin"
+if [ -z "$v" ] || [ ! -x "$bin/$tool" ]; then
+    echo "igor: PHP ${v:-?} is not installed in $PHP_ROOT${from:+ (wanted by $from)}" >&2
+    exit 127
+fi
+
+# Child processes (composer scripts, artisan, #!/usr/bin/env php) get the same version
+export PATH="$bin:$PATH"
+export PHP_INI_SCAN_DIR="${PHP_INI_SCAN_DIR:-${IGOR_HOME:-$HOME/.igor}/php}"
+exec "$bin/$tool" "$@"
+EOF
+    chmod +x "$SHIM_DIR/igor-shim"
+
+    # drop links for runtimes that are gone, then link the current set
+    find "$SHIM_DIR" -type l -lname igor-shim -delete
+    local v short t
+    for t in php composer frankenphp; do ln -s igor-shim "$SHIM_DIR/$t"; done
+    for v in $(installed_versions); do
+        short=${v/./}
+        for t in php composer frankenphp; do ln -s igor-shim "$SHIM_DIR/$t$short"; done
+    done
+
+    echo "Shims in $SHIM_DIR: $(cd "$SHIM_DIR" && ls | grep -v igor-shim | tr '\n' ' ')"
+    case ":$PATH:" in
+        *":$SHIM_DIR:"*) ;;
+        *) echo "Put them first on PATH, at the end of ~/.zshrc (after Herd's lines):"
+           echo "  export PATH=\"\$HOME/.igor/bin:\$PATH\"" ;;
+    esac
+}
+
+proxy_bin() { echo "$(php_bin "$(newest_php)")/frankenphp"; }
+
+reload_proxy() {
+    is_running proxy || { echo "(front proxy not running - run 'igor setup')"; return 0; }
+    "$(proxy_bin)" reload --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1 ||
+        die "proxy reload failed - check: igor logs proxy"
+}
+
+write_route() { # write_route <name> <port>
+    mkdir -p "$SITES_DIR"
+    cat > "$SITES_DIR/$1.caddy" <<EOF
+$1.$TLD {
+	reverse_proxy 127.0.0.1:$2
+}
+EOF
+}
+
+# --- commands --------------------------------------------------------------
+
+cmd_setup() {
+    command -v brew >/dev/null || die "Homebrew is required"
+    command -v direnv >/dev/null || { info "Installing direnv"; brew install direnv; }
+    brew list dnsmasq >/dev/null 2>&1 || { info "Installing dnsmasq"; brew install dnsmasq; }
+
+    local prefix conf
+    prefix=$(brew --prefix)
+    conf="$prefix/etc/dnsmasq.conf"
+    if ! grep -q "^# igor" "$conf" 2>/dev/null; then
+        info "Pointing *.$TLD to 127.0.0.1 in $conf"
+        printf '\n# igor\naddress=/.%s/127.0.0.1\nlisten-address=127.0.0.1\n' "$TLD" >> "$conf"
+    fi
+    info "Starting dnsmasq (needs sudo for port 53)"
+    sudo brew services restart dnsmasq
+
+    if [ "$(cat "/etc/resolver/$TLD" 2>/dev/null)" != "nameserver 127.0.0.1" ]; then
+        info "Creating /etc/resolver/$TLD (sudo)"
+        sudo mkdir -p /etc/resolver
+        echo "nameserver 127.0.0.1" | sudo tee "/etc/resolver/$TLD" >/dev/null
+    fi
+
+    mkdir -p "$IGOR_HOME" "$SITES_DIR" "$LOGS" "$INI_DIR"
+    touch "$REGISTRY"
+
+    if [ ! -f "$INI_DIR/99-igor.ini" ]; then
+        cat > "$INI_DIR/99-igor.ini" <<'EOF'
+; Shared dev settings for all sites and the CLI (via PHP_INI_SCAN_DIR)
+memory_limit = 512M
+upload_max_filesize = 64M
+post_max_size = 64M
+max_execution_time = 120
+display_errors = On
+error_reporting = E_ALL
+date.timezone = Europe/Zurich
+opcache.enable = 1
+opcache.enable_cli = 0
+opcache.validate_timestamps = 1
+opcache.revalidate_freq = 0
+EOF
+    fi
+
+    if [ ! -f "$CADDYFILE" ]; then
+        cat > "$CADDYFILE" <<EOF
+{
+	local_certs
+	admin localhost:2019
+	# Listens on all interfaces, so sites are reachable from your LAN unless
+	# the macOS firewall blocks it. Binding only 127.0.0.1 to ports 80/443
+	# needs root on macOS.
+}
+
+import $SITES_DIR/*.caddy
+EOF
+    fi
+
+    if pgrep -qf "Herd" 2>/dev/null; then
+        echo "Warning: Herd seems to be running - quit it, it holds ports 80/443." >&2
+    fi
+
+    info "Starting front proxy"
+    write_plist proxy "$IGOR_HOME" "$(php_bin "$(newest_php)"):/usr/bin:/bin:/usr/sbin:/sbin" \
+        "$(proxy_bin)" run --config "$CADDYFILE" --adapter caddyfile
+    agent_stop proxy
+    agent_start proxy
+    sleep 2
+
+    info "Creating PHP CLI shims"
+    cmd_shims
+
+    info "Trusting the local CA (macOS asks for your password)"
+    "$(proxy_bin)" trust || echo "Trust failed - retry with: $(proxy_bin) trust" >&2
+
+    cat <<EOF
+
+Done. Make sure your shell loads direnv (zsh: eval "\$(direnv hook zsh)" in ~/.zshrc).
+Then, in a project:  igor add <name>
+EOF
+}
+
+cmd_add() {
+    local name="" php="" port="" dir
+    dir=$(pwd)
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --php)  php=${2:-}; shift 2 ;;
+            --port) port=${2:-}; shift 2 ;;
+            -*)     die "unknown option $1" ;;
+            *)      [ -z "$name" ] || die "unexpected argument '$1'"; name=$1; shift ;;
+        esac
+    done
+    [ -n "$name" ] || die "usage: igor add <name> [--php 8.x] [--port N]  (e.g. igor add portal.valuequest)"
+    name=${name%.$TLD}   # accept 'portal.valuequest.test' too
+    check_name "$name"
+    [ -f "$CADDYFILE" ] || die "run 'igor setup' first"
+    [ -z "$(registry_get "$name")" ] || die "'$name' already exists (igor rm $name)"
+    [ -d "$dir/public" ] || die "no public/ in $dir - run this in the project root"
+    local existing
+    existing=$(awk -F'\t' -v d="$dir" '$5 == d { print $1 }' "$REGISTRY" 2>/dev/null || true)
+    [ -z "$existing" ] || die "this folder is already served as '$existing'"
+
+    # PHP version: --php, else .php-version, else newest installed
+    if [ -z "$php" ] && [ -f "$dir/.php-version" ]; then
+        php=$(tr -d '[:space:]' < "$dir/.php-version")
+    fi
+    [ -n "$php" ] || php=$(newest_php)
+    [ -x "$(php_bin "$php")/frankenphp" ] || die "PHP $php is not installed in $PHP_ROOT/php$php"
+    echo "$php" > "$dir/.php-version"
+
+    [ -n "$port" ] || port=$(next_port)
+    while port_in_use "$port"; do port=$((port + 1)); done
+
+    # direnv: shared runtime on PATH, shared ini for the CLI too
+    if [ ! -f "$dir/.envrc" ] || ! grep -q "igor" "$dir/.envrc"; then
+        cat >> "$dir/.envrc" <<'EOF'
+# igor: PHP runtime from .php-version
+PATH_add "$HOME/frankenphp/php$(tr -d '[:space:]' < .php-version)/bin"
+export PHP_INI_SCAN_DIR="$HOME/.igor/php"
+EOF
+        command -v direnv >/dev/null && (cd "$dir" && direnv allow)
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$port" php "$php" "$dir" >> "$REGISTRY"
+    write_plist "$name" "$dir" "$(php_bin "$php"):/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        "$(php_bin "$php")/frankenphp" php-server --root "$dir/public" --listen "127.0.0.1:$port"
+    write_route "$name" "$port"
+    agent_start "$name"
+    reload_proxy
+
+    cat <<EOF
+https://$name.$TLD  ->  http://127.0.0.1:$port  (PHP $php)
+Pinned in .php-version - add .php-version and .envrc to git if the team should share it.
+EOF
+}
+
+cmd_proxy() {
+    local name=${1:-} port=${2:-}
+    [ -n "$name" ] && [ -n "$port" ] || die "usage: igor proxy <name> <port>"
+    check_name "$name"
+    [[ "$port" =~ ^[0-9]+$ ]] || die "port must be a number"
+    [ -z "$(registry_get "$name")" ] || die "'$name' already exists"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$port" proxy - - >> "$REGISTRY"
+    write_route "$name" "$port"
+    reload_proxy
+    echo "https://$name.$TLD  ->  http://127.0.0.1:$port  (you run the service yourself)"
+}
+
+cmd_rm() {
+    local name=${1:-}
+    [ -n "$(registry_get "$name")" ] || die "no site '$name'"
+    agent_stop "$name"
+    rm -f "$(plist "$name")" "$SITES_DIR/$name.caddy"
+    awk -F'\t' -v n="$name" '$1 != n' "$REGISTRY" > "$REGISTRY.tmp" && mv "$REGISTRY.tmp" "$REGISTRY"
+    reload_proxy
+    echo "Removed $name (project files, .php-version and .envrc left as they are)"
+}
+
+require_php_site() {
+    [ -n "$(registry_get "$1")" ] || die "no site '$1'"
+    [ "$(registry_field "$1" 3)" = php ] || die "'$1' is a proxy route - start that service yourself"
+}
+
+cmd_start()   { require_php_site "${1:-}"; agent_start "$1"; echo "$1 started"; }
+cmd_stop()    { require_php_site "${1:-}"; agent_stop "$1"; echo "$1 stopped"; }
+cmd_restart() { require_php_site "${1:-}"; agent_stop "$1"; agent_start "$1"; echo "$1 restarted"; }
+
+cmd_list() {
+    [ -s "$REGISTRY" ] || { echo "No sites yet - run 'igor add <name>' in a project."; return 0; }
+    printf '%-28s %-6s %-6s %-8s %s\n' NAME PORT PHP STATE DIR
+    local name port type php dir state
+    while IFS=$'\t' read -r name port type php dir; do
+        if [ "$type" = proxy ]; then
+            state=$(port_in_use "$port" && echo up || echo down)
+        else
+            state=$(is_running "$name" && echo running || echo stopped)
+        fi
+        printf '%-28s %-6s %-6s %-8s %s\n' "$name" "$port" "$php" "$state" "$dir"
+    done < "$REGISTRY"
+    echo ""
+    echo "Front proxy: $(is_running proxy && echo running || echo stopped)"
+}
+
+cmd_logs() {
+    local name=${1:-}
+    [ -n "$name" ] || die "usage: igor logs <name|proxy>"
+    [ -f "$LOGS/$name.log" ] || die "no log for '$name' yet"
+    tail -f "$LOGS/$name.log"
+}
+
+cmd_info() {
+    local name=${1:-} port
+    [ -n "$(registry_get "$name")" ] || die "no site '$name'"
+    port=$(registry_field "$name" 2)
+    cat <<EOF
+Browser:   https://$name.$TLD
+Internal:  http://127.0.0.1:$port     (server-to-server, no TLS)
+
+.env hints for apps talking to '$name':
+  # SSO: browser redirects public, back-channel internal
+  SSO_URL=https://$name.$TLD
+  SSO_INTERNAL_URL=http://127.0.0.1:$port
+  # Reverb: server publishes internally, browser connects via the proxy
+  REVERB_HOST=127.0.0.1
+  REVERB_PORT=$port
+  REVERB_SCHEME=http
+  VITE_REVERB_HOST=$name.$TLD
+  VITE_REVERB_PORT=443
+  VITE_REVERB_SCHEME=https
+EOF
+}
+
+case "${1:-}" in
+    setup)   shift; cmd_setup "$@" ;;
+    add)     shift; cmd_add "$@" ;;
+    proxy)   shift; cmd_proxy "$@" ;;
+    rm)      shift; cmd_rm "$@" ;;
+    start)   shift; cmd_start "$@" ;;
+    stop)    shift; cmd_stop "$@" ;;
+    restart) shift; cmd_restart "$@" ;;
+    list|ls) shift; cmd_list "$@" ;;
+    logs)    shift; cmd_logs "$@" ;;
+    info)    shift; cmd_info "$@" ;;
+    reload)  shift; reload_proxy; echo "Front proxy reloaded" ;;
+    shims)   shift; cmd_shims "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) usage; exit 1 ;;
+esac
