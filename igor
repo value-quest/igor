@@ -56,7 +56,10 @@ Usage: igor <command> [args]
                             queue, ...) and keep them running; rerun after
                             editing Procfile.dev
   start|stop|restart <name> control a site and its workers, or a service
-                            (<name>:<worker> for a single worker)
+                            (<name>:<worker> for a single worker); stopped
+                            stays stopped after a restart of the Mac
+  start | stop              everything: proxy, sites, workers and services
+                            (e.g. to switch to Herd and back)
   list                      all sites, workers, services and routes with state
   logs <name>               follow a log (<name>:<worker>, or "proxy")
   logs --clear [<name>]     empty one log, or all of them
@@ -206,9 +209,17 @@ EOF
     fi
 }
 
+# Starting an agent also enables it; 'igor stop' disables it, so a stopped
+# agent stays stopped across logins (launchd loads every plist at login).
 agent_start() {
+    launchctl enable "$(domain)/$(label "$1")"
     is_running "$1" && return 0
     launchctl bootstrap "$(domain)" "$(plist "$1")"
+}
+
+agent_disable() {
+    agent_stop "$1"
+    launchctl disable "$(domain)/$(label "$1")"
 }
 
 agent_stop() {
@@ -870,14 +881,45 @@ control() {   # control start|stop|restart <name>
         [ "$SITE_CHANGED" = 0 ] || agent_stop "$name"
     fi
     for a in $list; do
-        [ "$action" = start ] || agent_stop "$a"
-        [ "$action" = stop ]  || agent_start "$a"
+        case "$action" in
+            stop)    agent_disable "$a" ;;
+            start)   agent_start "$a" ;;
+            restart) agent_stop "$a"; agent_start "$a" ;;
+        esac
     done
     echo "$name ${action/%p/pp}ed"
 }
 
-cmd_start()   { control start "$@"; }
-cmd_stop()    { control stop "$@"; }
+# everything igor runs: sites + workers and services (registry order)
+all_names() {
+    [ -f "$REGISTRY" ] || return 0
+    awk -F'\t' '$3 == "php" || $3 == "service" { print $1 }' "$REGISTRY"
+}
+
+start_all() {
+    if ! is_running proxy && { port_in_use 80 || port_in_use 443; }; then
+        die "ports 80/443 are in use - quit Herd (or whatever holds them) first"
+    fi
+    info "Front proxy"
+    agent_start proxy
+    local name
+    for name in $(all_names); do control start "$name"; done
+    echo ""
+    echo "igor is running: https://<name>.$TLD"
+}
+
+stop_all() {
+    local name
+    for name in $(all_names); do control stop "$name"; done
+    info "Front proxy"
+    agent_disable proxy
+    echo ""
+    echo "igor is stopped and stays stopped after a restart. Ports 80/443 are free,"
+    echo "so you can start Herd now. Back to igor: quit Herd, then 'igor start'."
+}
+
+cmd_start()   { if [ $# -eq 0 ]; then start_all; else control start "$@"; fi; }
+cmd_stop()    { if [ $# -eq 0 ]; then stop_all;  else control stop "$@"; fi; }
 cmd_restart() { control restart "$@"; }
 
 cmd_list() {

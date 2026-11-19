@@ -17,6 +17,7 @@ App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like
   - [Update](#update)
   - [Requirements for the darwin build](#requirements-for-the-darwin-build)
 - [Setup (once)](#setup-once)
+  - [Trying igor next to Herd](#trying-igor-next-to-herd)
 - [Daily use](#daily-use)
 - [Workers (Reverb, queues, scheduler, ...)](#workers-reverb-queues-scheduler-)
 - [Services (Redis, Mailpit, S3)](#services-redis-mailpit-s3)
@@ -81,6 +82,18 @@ echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
 
 `setup` installs dnsmasq and direnv through Homebrew. It points `*.test` to 127.0.0.1, starts the front proxy as a LaunchAgent, and puts the Caddy local CA into the macOS keychain. It asks for sudo for dnsmasq (port 53) and for `/etc/resolver/test`.
 
+### Trying igor next to Herd
+
+igor and Herd both need ports 80/443, so only one of them can run at a time:
+
+```bash
+igor stop     # proxy, sites, workers, services; they stay stopped after a restart of the Mac
+              # -> start Herd
+igor start    # quit Herd first; igor refuses to start while 80/443 are taken
+```
+
+Your sites, configs and service data stay as they are in between. dnsmasq keeps running; it sends `*.test` to 127.0.0.1 for igor and Herd alike.
+
 ## Daily use
 
 ```bash
@@ -90,6 +103,7 @@ igor proxy reverb 8080                    # route to a service you run yourself
 igor service add redis -- redis-server    # background service, see below
 igor list
 igor stop portal / start portal / logs portal
+igor stop / igor start                    # everything, e.g. to switch to Herd and back
 igor workers                              # sync Procfile.dev workers
 igor refresh                              # regenerate everything, restart what changed
 igor info sso                             # internal URL + .env hints
@@ -205,7 +219,7 @@ Run `igor shims` again after you install or remove a runtime, so the numbered co
 
 ## Notes
 
-- Sites start at login. Stop the ones you don't need with `igor stop`; an idle FrankenPHP server uses a few tens of MB.
+- Everything igor runs starts at login. `igor stop <name>` stops a site, worker or service and keeps it stopped after a restart of the Mac, until `igor start <name>`. An idle FrankenPHP server uses a few tens of MB.
 - PHP sees every request as HTTPS (`HTTPS=on`), so Laravel generates `https://` URLs and assets behind the front proxy without trusting any proxy. That includes direct calls to `http://127.0.0.1:<port>`. The client IP is still `127.0.0.1`.
 - Logs are not rotated. `igor logs --clear <name>` empties one (`portal:queue` for a worker), `igor logs --clear` all of them. Running services keep logging into the emptied file.
 - The front proxy listens on all interfaces, so sites are reachable from your LAN unless the macOS firewall blocks them. Binding only to 127.0.0.1 on ports 80/443 needs root on macOS.
