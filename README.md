@@ -6,7 +6,7 @@ Local Laravel sites on macOS with the ValueQuest FrankenPHP suite. It replaces H
 
 ```
 Browser ──https://app.test──▶ front proxy (Caddy local CA, :80/:443)
-                                 └──▶ http://127.0.0.1:81xx  FrankenPHP php-server (per site)
+                                 └──▶ http://127.0.0.1:81xx  FrankenPHP (per site, HTTPS=on)
 App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like prod)
 ```
 
@@ -143,13 +143,15 @@ Run `igor shims` again after you install or remove a runtime, so the numbered co
 |---|---|
 | `~/.igor/sites.tsv` | registry: name, port, type, PHP version, folder |
 | `~/.igor/Caddyfile`, `~/.igor/sites/*.caddy` | front proxy config, one route per site |
+| `~/.igor/backends/*.Caddyfile` | generated FrankenPHP config per site (sets `HTTPS=on` for PHP) |
 | `~/.igor/php/99-igor.ini` | shared php.ini settings (web and CLI, via `PHP_INI_SCAN_DIR`) |
 | `~/.igor/logs/` | one log per site and per worker (`<site>@<worker>.log`), plus `proxy.log` |
 | `~/Library/LaunchAgents/dev.igor.*.plist` | LaunchAgents for the proxy, sites and workers (`<site>@<worker>`): start at login, restart if they crash |
 
 ## Notes
 
-- Sites start at login. Stop the ones you don't need with `igor stop`; an idle php-server uses a few tens of MB.
+- Sites start at login. Stop the ones you don't need with `igor stop`; an idle FrankenPHP server uses a few tens of MB.
+- PHP sees every request as HTTPS (`HTTPS=on`), so Laravel generates `https://` URLs and assets behind the front proxy without trusting any proxy. That includes direct calls to `http://127.0.0.1:<port>`. The client IP is still `127.0.0.1`.
 - Logs are not rotated. Truncate a busy one with `: > ~/.igor/logs/<file>.log`.
 - The front proxy listens on all interfaces, so sites are reachable from your LAN unless the macOS firewall blocks them. Binding only to 127.0.0.1 on ports 80/443 needs root on macOS.
 - The script targets the bash 3.2 that ships with macOS and needs nothing else.
