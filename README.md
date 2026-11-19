@@ -13,7 +13,7 @@ App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like
 ## Contents
 
 - [PHP runtimes (ValueQuest FrankenPHP suite)](#php-runtimes-valuequest-frankenphp-suite)
-  - [Install and update](#install-and-update)
+  - [Install, update and uninstall](#install-update-and-uninstall)
   - [Requirements for the darwin build](#requirements-for-the-darwin-build)
 - [Setup (once)](#setup-once)
   - [Trying igor next to Herd](#trying-igor-next-to-herd)
@@ -35,25 +35,25 @@ igor uses the darwin builds from [value-quest/franken-php](https://github.com/va
 
 All projects share these two runtimes. Each project picks one in its `.php-version`, so a PHP update is a single install, not one per project.
 
-### Install and update
+### Install, update and uninstall
 
 ```bash
-igor update --check     # installed vs. available PHP and FrankenPHP versions
-igor update             # install/update, then restart everything on the new binaries
-igor update --force     # reinstall even if up to date
+igor install            # first time: installs every PHP version in the latest release
+igor update             # later: installs new versions, then restarts everything on them
+igor update --check     # installed vs. available PHP and FrankenPHP versions, changes nothing
+igor update --force     # reinstall even if up to date, e.g. after a build fix
+igor uninstall 8.4      # remove a PHP version the suite no longer ships
 ```
 
-`igor update` asks GitHub for the latest release and downloads `frankenphp-darwin-<arch>-php8x.tar.gz` for every PHP version the release ships. It runs each archive's `install.sh --versioned 8.x`, checks that `php` and `frankenphp` run, and records what it installed in `~/frankenphp/php8.x/.igor-release`.
+**`igor install`** is the same command as `igor update`, under the name that fits a new Mac. Run it before `igor setup`. It downloads `frankenphp-darwin-<arch>-php8x.tar.gz` for every PHP version in the latest release and runs each archive's `install.sh --versioned 8.x`. It checks that `php` and `frankenphp` run and records what it installed in `~/frankenphp/php8.x/.igor-release`.
 
-The suite rebuilds its archives every day and replaces them in a release tagged with the FrankenPHP version. So igor compares versions, not tags or dates. The release's `versions.json` (`{"frankenphp": "1.13.5", "php84": "8.4.27", "php85": "8.5.13"}`) is checked against the installed PHP version and the FrankenPHP version in the marker. A daily rebuild with the same versions counts as up to date. A new PHP patch or FrankenPHP version gets installed. Use `--force` to install a rebuild anyway, e.g. after a build fix. Releases without `versions.json` only count as new when their tag changes. Then it runs `igor refresh --restart`. On a new Mac, run it before `igor setup`.
+**`igor update`** does the same, then runs `igor refresh --restart`, so the proxy, sites, workers and services restart on the new binaries. It installs only what changed. The suite rebuilds its archives every day into a release tagged with the FrankenPHP version, so igor compares versions instead of tags or dates. The versions come from the release's `versions.json` (`{"frankenphp": "1.13.5", "php84": "8.4.28", "php85": "8.5.13"}`). A daily rebuild with the same versions counts as up to date; a new PHP patch or FrankenPHP version gets installed. When the suite adds a minor version (e.g. 8.6), `update` installs it next to the others. Runtimes installed by hand show as `?` until their first `igor update`.
 
-The installer keeps the previous version as `~/frankenphp/php8.x.backup.<date>`, and igor keeps only the newest of those backups. To roll back, move the backup back to `php8.x` and run `igor refresh --restart`.
+**`igor uninstall <8.x>`** removes `~/frankenphp/php8.x` and its backups after you confirm (`--yes` skips the question). It refuses while a site still uses that version, so switch those projects first: change their `.php-version` and run `igor refresh`. It also refuses to remove the last runtime, which the front proxy needs. Afterwards it runs `igor refresh`, so the proxy and the `php8x` shims move to the remaining versions. `igor update --check` lists installed versions the suite no longer ships.
 
-Runtimes installed by hand show as `unknown` until the first `igor update`.
+The installer keeps the previous version as `~/frankenphp/php8.x.backup.<date>`, and igor keeps only the newest backup. To roll back, move the backup back to `php8.x` and run `igor refresh --restart`.
 
-When the suite moves on to a new minor version (e.g. drops 8.4 and adds 8.6), `igor update` installs the new one. Change `.php-version` in the projects that used the dropped version and run `igor refresh`.
-
-<details><summary>Manual install (what <code>igor update</code> does)</summary>
+<details><summary>Manual install (what <code>igor install</code> does)</summary>
 
 Run it as your normal user, **without sudo**. Always use `--versioned` on macOS: the normal install writes to `~/bin` and `~/.bash_profile` and looks for running servers through `/proc`, which macOS doesn't have.
 
@@ -79,6 +79,7 @@ Each binary must run straight from its folder. On macOS that means dylibs in `..
 
 ```bash
 cp igor ~/bin/ && chmod +x ~/bin/igor     # or anywhere on PATH
+igor install                              # PHP runtimes, see above
 # quit Herd first (it holds ports 80/443)
 igor setup
 echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc

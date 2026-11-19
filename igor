@@ -66,9 +66,13 @@ Usage: igor <command> [args]
   logs --clear [<name>]     empty one log, or all of them
   info <name>               URLs and .env hints for internal access
   reload                    reload the front proxy config
+  install [--check] [--force]
+                            install the FrankenPHP suite (every PHP version in
+                            the latest release); same as update, use it first
   update [--check] [--force]
-                            install the latest FrankenPHP suite release for
-                            every PHP version it ships, then refresh --restart
+                            install the latest suite release, then restart
+                            everything on the new binaries
+  uninstall <8.x> [--yes]   remove a PHP runtime the suite no longer ships
   refresh [--restart]       regenerate all configs (PHP from each .php-version,
                             Procfile.dev workers, routes, newest PHP for the
                             proxy) and restart what changed; --restart
@@ -795,14 +799,17 @@ marker_get() {     # marker_get <8.x> <key>
 }
 installed_php() { "$PHP_ROOT/php$1/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || true; }
 
+# cmd_update <install|update> [--check] [--force]: one command under two
+# names - 'install' on a new Mac, 'update' later; both install what's missing
 cmd_update() {
+    local cmd=$1; shift
     local check=0 force=0 arch json tag n i aname versions="" fp_avail
-    local v short avail inst_php inst_fp pending="" tmp b got shorts=""
+    local v short avail inst_php inst_fp pending="" tmp b got shorts="" dropped=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --check) check=1; shift ;;
             --force) force=1; shift ;;
-            *) die "usage: igor update [--check] [--force]" ;;
+            *) die "usage: igor $cmd [--check] [--force]" ;;
         esac
     done
 
@@ -849,8 +856,22 @@ cmd_update() {
         fi
     done
 
-    if [ -z "$pending" ]; then echo "Up to date."; return 0; fi
-    if [ "$check" = 1 ]; then echo "Run 'igor update' to install PHP$pending."; return 0; fi
+    # installed runtimes the suite no longer ships
+    for v in $(installed_versions); do
+        case " $shorts " in *" php${v/./} "*) continue ;; esac
+        printf '  %-6s %-28s %s\n' "$v" "$(installed_php "$v") (FrankenPHP $(marker_get "$v" frankenphp))" \
+            "no longer in the release"
+        dropped="$dropped $v"
+    done
+    for v in $dropped; do
+        echo "PHP $v is no longer shipped: switch its projects to another version, then 'igor uninstall $v'."
+    done
+
+    if [ -z "$pending" ]; then
+        if [ "$cmd" = install ]; then echo "Everything is installed and up to date."; else echo "Up to date."; fi
+        return 0
+    fi
+    if [ "$check" = 1 ]; then echo "Run 'igor $cmd' to install PHP$pending."; return 0; fi
 
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/igor-update.XXXXXX")
     # expand $tmp now: the EXIT trap runs after cmd_update's locals are gone
@@ -889,6 +910,52 @@ cmd_update() {
     fi
     info "Restarting everything on the new binaries"
     cmd_refresh --restart
+}
+
+# igor uninstall <8.x> [--yes]: remove a PHP runtime (not igor itself)
+cmd_uninstall() {
+    local v="" yes=0 users backups b answer
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -y|--yes) yes=1; shift ;;
+            -*)       die "unknown option $1" ;;
+            *)        [ -z "$v" ] || die "unexpected argument '$1'"; v=$1; shift ;;
+        esac
+    done
+    [[ "$v" =~ ^[0-9]+\.[0-9]+$ ]] ||
+        die "usage: igor uninstall <8.x> [--yes]   removes a PHP runtime from $PHP_ROOT (not igor)"
+    [ -d "$PHP_ROOT/php$v" ] || die "PHP $v is not installed in $PHP_ROOT"
+
+    users=$(awk -F'\t' -v v="$v" '$3 == "php" && $4 == v { print "  " $1 "  (" $5 ")" }' "$REGISTRY" 2>/dev/null || true)
+    [ -z "$users" ] || die "PHP $v is still used by:
+$users
+Change .php-version in those projects to another version, run 'igor refresh', then try again."
+    if [ -f "$CADDYFILE" ] && [ "$(installed_versions | grep -vxF "$v" | head -1)" = "" ]; then
+        die "PHP $v is the only runtime left - the front proxy needs one (install another with 'igor install' first)"
+    fi
+
+    backups=$(ls -d "$PHP_ROOT/php$v.backup."* 2>/dev/null || true)
+    echo "This removes:"
+    echo "  $PHP_ROOT/php$v  (PHP $(installed_php "$v"))"
+    for b in $backups; do echo "  $b"; done
+    if [ "$yes" = 0 ]; then
+        [ -t 0 ] || die "not a terminal - pass --yes to confirm"
+        read -r -p "Continue? [y/N] " answer
+        [[ "$answer" =~ ^[yY]$ ]] || die "cancelled"
+    fi
+
+    rm -rf "${PHP_ROOT:?}/php$v"
+    for b in $backups; do
+        [[ "$b" == "$PHP_ROOT/php$v.backup."* ]] && rm -rf "$b"
+    done
+    echo "Removed PHP $v"
+
+    if [ -f "$CADDYFILE" ]; then
+        info "Moving the front proxy and shims to the remaining runtimes"
+        cmd_refresh
+    else
+        cmd_shims >/dev/null
+    fi
 }
 
 # --- workers (Procfile.dev) --------------------------------------------------
@@ -1159,7 +1226,9 @@ case "${1:-}" in
     shims)   shift; cmd_shims "$@" ;;
     workers) shift; cmd_workers "$@" ;;
     refresh) shift; cmd_refresh "$@" ;;
-    update)  shift; cmd_update "$@" ;;
+    install) shift; cmd_update install "$@" ;;
+    update)  shift; cmd_update update "$@" ;;
+    uninstall) shift; cmd_uninstall "$@" ;;
     service) shift; cmd_service "$@" ;;
     services) shift; cmd_services "$@" ;;
     -h|--help|help|"") usage ;;
