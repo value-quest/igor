@@ -19,6 +19,7 @@ App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like
 - [Setup (once)](#setup-once)
 - [Daily use](#daily-use)
 - [Workers (Reverb, queues, scheduler, ...)](#workers-reverb-queues-scheduler-)
+- [Services (Redis, Mailpit, S3)](#services-redis-mailpit-s3)
 - [PHP on the command line](#php-on-the-command-line)
 - [Files](#files)
 - [Notes](#notes)
@@ -87,7 +88,7 @@ echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
 cd ~/Code/portal && igor add              # https://portal.test, newest PHP
 cd ~/Code/sso    && igor add sso --php 8.4
 igor proxy reverb 8080                    # route to a service you run yourself
-igor proxy mail 8025                      # Mailpit UI
+igor service add redis -- redis-server    # background service, see below
 igor list
 igor stop portal / start portal / logs portal
 igor workers                              # sync Procfile.dev workers
@@ -120,6 +121,36 @@ igor stop portal                # same for stop/start
 
 Locally, prefer `queue:listen` over `queue:work`: it picks up code changes without a restart. Only list commands that keep running. A command that exits is started again every 10 seconds.
 
+## Services (Redis, Mailpit, S3)
+
+Shared services run natively as LaunchAgents too. You don't need Docker or a VM. Install the binary, then hand igor the command:
+
+```bash
+brew install redis mailpit
+
+igor service add redis -- redis-server --port 6379
+igor service add mail --route 8025 -- mailpit --smtp 127.0.0.1:2525 --listen 127.0.0.1:8025 --database mailpit.db
+igor service add s3 --route 9001 --env MINIO_ROOT_USER=admin --env MINIO_ROOT_PASSWORD=change-me \
+    -- silo server . --address 127.0.0.1:9000 --console-address 127.0.0.1:9001
+```
+
+- Each service runs in `~/.igor/data/<name>`, so relative paths in the command (Redis' `dump.rdb`, `mailpit.db`, `.` for Silo) keep their data there.
+- `--route PORT` serves the service's web UI as `https://<name>.test`, e.g. `https://mail.test` for Mailpit.
+- `--env KEY=VALUE` sets environment variables. You can repeat it.
+- Commands without a path are looked up in Homebrew first. Silo has no formula: download the macOS binary from its GitHub releases and pass its full path. Check its arguments by hand once first; the line above assumes it works like MinIO.
+- To change a command, run `igor service add` again with the same name. igor restarts the service only if something changed.
+- `igor start|stop|restart|logs|info <name>` work as for sites. `igor rm <name>` removes the service and keeps its data.
+
+Apps connect directly, without the proxy:
+
+```dotenv
+REDIS_HOST=127.0.0.1
+MAIL_HOST=127.0.0.1
+MAIL_PORT=2525
+AWS_ENDPOINT=http://127.0.0.1:9000
+AWS_USE_PATH_STYLE_ENDPOINT=true
+```
+
 ## PHP on the command line
 
 `igor setup` (or `igor shims` on its own) puts shims in `~/.igor/bin`:
@@ -145,6 +176,7 @@ Run `igor shims` again after you install or remove a runtime, so the numbered co
 | `~/.igor/Caddyfile`, `~/.igor/sites/*.caddy` | front proxy config, one route per site |
 | `~/.igor/backends/*.Caddyfile` | generated FrankenPHP config per site (sets `HTTPS=on` for PHP) |
 | `~/.igor/php/99-igor.ini` | shared php.ini settings (web and CLI, via `PHP_INI_SCAN_DIR`) |
+| `~/.igor/data/<service>/` | working folder and data of each service |
 | `~/.igor/logs/` | one log per site and per worker (`<site>@<worker>.log`), plus `proxy.log` |
 | `~/Library/LaunchAgents/dev.igor.*.plist` | LaunchAgents for the proxy, sites and workers (`<site>@<worker>`): start at login, restart if they crash |
 

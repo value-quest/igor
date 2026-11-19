@@ -39,13 +39,19 @@ Usage: igor <command> [args]
                             (e.g. 'igor add portal.valuequest')
   proxy <name> <port>       route https://<name>.$TLD to a service you run
                             yourself (Reverb, Mailpit UI, Vite, ...)
-  rm <name>                 remove a site (project files are not touched)
+  service add <name> [--route PORT] [--env KEY=VALUE]... -- <command...>
+                            run a background service (Redis, Mailpit, S3, ...)
+                            in $IGOR_HOME/data/<name>; --route PORT also serves
+                            its web UI as https://<name>.$TLD. Run it again to
+                            change the command.
+  rm <name>                 remove a site, service or route (project files and
+                            service data are not touched)
   workers [<name>]          start the site's Procfile.dev processes (reverb,
                             queue, ...) and keep them running; rerun after
                             editing Procfile.dev
-  start|stop|restart <name> control a site and its workers
+  start|stop|restart <name> control a site and its workers, or a service
                             (<name>:<worker> for a single worker)
-  list                      all sites and workers with port, PHP version and state
+  list                      all sites, workers, services and routes with state
   logs <name>               follow a log (<name>:<worker>, or "proxy")
   info <name>               URLs and .env hints for internal access
   reload                    reload the front proxy config
@@ -77,6 +83,7 @@ check_name() {
     local label='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
     [[ "$1" =~ ^$label(\.$label)*$ ]] ||
         die "invalid name '$1' (lowercase letters, digits, dashes; dots between parts)"
+    [ "$1" != proxy ] || die "'proxy' is reserved for the front proxy"
 }
 
 registry_get() {   # registry_get <name> -> the line, or nothing
@@ -90,7 +97,9 @@ registry_field() { # registry_field <name> <column 1-5>
 
 next_port() {
     local max
-    max=$( { [ -f "$REGISTRY" ] && cut -f2 "$REGISTRY"; echo $((FIRST_PORT - 1)); } | sort -n | tail -1)
+    # sites only: routes and services use their own ports (8025, 9001, ...)
+    max=$( { [ -f "$REGISTRY" ] && awk -F'\t' '$3 == "php" { print $2 }' "$REGISTRY"
+             echo $((FIRST_PORT - 1)); } | sort -n | tail -1)
     echo $((max + 1))
 }
 
@@ -102,8 +111,30 @@ label()  { echo "$LABEL_PREFIX.$1"; }
 plist()  { echo "$AGENTS/$(label "$1").plist"; }
 domain() { echo "gui/$(id -u)"; }
 
-is_running() {
+is_running() {   # loaded in launchd (it may be crash-looping, see is_alive)
     launchctl print "$(domain)/$(label "$1")" >/dev/null 2>&1
+}
+
+is_alive() {     # its process is up right now
+    launchctl print "$(domain)/$(label "$1")" 2>/dev/null | grep -q $'^\tstate = running'
+}
+
+# check_alive <name> <log offset>: after a start, make sure the process stays
+# up; if not, show what it logged since <offset> (bytes) and fail.
+check_alive() {
+    local name=$1 offset=$2 log="$LOGS/$1.log" out
+    sleep 2
+    is_alive "$name" && return 0
+    out=$(tail -c +$((offset + 1)) "$log" 2>/dev/null | tail -15)
+    [ -n "$out" ] || out=$(tail -15 "$log" 2>/dev/null)
+    {
+        echo ""
+        echo "igor: $name is not running - it exited right after starting. Its log:"
+        echo "${out:-  (empty)}" | sed 's/^/  | /'
+        echo "launchd keeps retrying every 10s. Fix the command and run 'igor service add $name ...' again,"
+        echo "or remove it with 'igor rm $name'."
+    } >&2
+    exit 1
 }
 
 xml_escape() {
@@ -140,6 +171,13 @@ EOF
     <key>PATH</key><string>$(xml_escape "$path")</string>
     <key>PHP_INI_SCAN_DIR</key><string>$(xml_escape "$INI_DIR")</string>
     <key>HOME</key><string>$(xml_escape "$HOME")</string>
+EOF
+        local kv
+        while IFS= read -r kv; do
+            [ -n "$kv" ] || continue
+            echo "    <key>$(xml_escape "${kv%%=*}")</key><string>$(xml_escape "${kv#*=}")</string>"
+        done <<< "${PLIST_ENV:-}"
+        cat <<EOF
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -452,6 +490,79 @@ cmd_proxy() {
     echo "https://$name.$TLD  ->  http://127.0.0.1:$port  (you run the service yourself)"
 }
 
+# --- services (Redis, Mailpit, S3, ...) ----------------------------------------
+# Registry line: name <TAB> route port or "-" <TAB> service <TAB> - <TAB> data dir
+
+cmd_service() {
+    local sub=${1:-}
+    shift || true
+    case "$sub" in
+        add) service_add "$@" ;;
+        rm)  cmd_rm "$@" ;;
+        *)   die "usage: igor service add <name> [--route PORT] [--env KEY=VALUE]... -- <command...>" ;;
+    esac
+}
+
+service_add() {
+    local name="" route="-" envs="" cmd exe data existing
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --route) route=${2:-}; shift 2 ;;
+            --env)   [[ "${2:-}" == ?*=* ]] || die "--env needs KEY=VALUE"
+                     envs="$envs${2}"$'\n'; shift 2 ;;
+            --)      shift; break ;;
+            -*)      die "unknown option $1" ;;
+            *)       [ -z "$name" ] || die "unexpected argument '$1' (put the command after --)"
+                     name=$1; shift ;;
+        esac
+    done
+    [ -n "$name" ] && [ $# -gt 0 ] ||
+        die "usage: igor service add <name> [--route PORT] [--env KEY=VALUE]... -- <command...>"
+    check_name "$name"
+    [ "$route" = - ] || [[ "$route" =~ ^[0-9]+$ ]] || die "--route needs a port number"
+    [ -f "$CADDYFILE" ] || die "run 'igor setup' first"
+
+    existing=$(registry_field "$name" 3)
+    [ -z "$existing" ] || [ "$existing" = service ] ||
+        die "'$name' already exists as a $existing (igor rm $name)"
+
+    # launchd needs a full path; look in Homebrew too
+    cmd=$1; exe=$1; shift
+    if [[ "$exe" != */* ]]; then
+        exe=$(PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" command -v "$cmd" || true)
+        [ -n "$exe" ] || die "'$cmd' not found - install it first (e.g. brew install $cmd)"
+    fi
+    [ -x "$exe" ] || die "$exe is not executable"
+
+    data="$IGOR_HOME/data/$name"
+    mkdir -p "$data"
+
+    # replace the registry line (re-adding updates the service)
+    if [ -n "$existing" ]; then
+        awk -F'\t' -v n="$name" '$1 != n' "$REGISTRY" > "$REGISTRY.tmp" && mv "$REGISTRY.tmp" "$REGISTRY"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$route" service - "$data" >> "$REGISTRY"
+
+    PLIST_ENV="$envs" write_plist "$name" "$data" \
+        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$exe" "$@"
+    local offset
+    offset=$(wc -c < "$LOGS/$name.log" 2>/dev/null || echo 0)
+    [ "$PLIST_CHANGED" = 0 ] || agent_stop "$name"
+    agent_start "$name"
+
+    if [ "$route" != - ]; then
+        write_route "$name" "$route"
+    else
+        rm -f "$SITES_DIR/$name.caddy"
+    fi
+    reload_proxy
+
+    echo "$name: $exe $*"
+    echo "  data: $data   log: igor logs $name"
+    [ "$route" = - ] || echo "  https://$name.$TLD  ->  http://127.0.0.1:$route"
+    check_alive "$name" "$offset"
+}
+
 # --- workers (Procfile.dev) --------------------------------------------------
 # A worker is a launchd agent named "<site>@<worker>"; users write <site>:<worker>.
 
@@ -534,14 +645,19 @@ cmd_workers() {
 
 cmd_rm() {
     local name=${1:-}
-    [ -n "$(registry_get "$name")" ] || die "no site '$name'"
-    local w
+    [ -n "$(registry_get "$name")" ] || die "no site, service or route '$name'"
+    local w type
+    type=$(registry_field "$name" 3)
     for w in $(site_workers "$name"); do remove_agent "$w"; done
     agent_stop "$name"
     rm -f "$(plist "$name")" "$SITES_DIR/$name.caddy" "$BACKENDS_DIR/$name.Caddyfile"
     awk -F'\t' -v n="$name" '$1 != n' "$REGISTRY" > "$REGISTRY.tmp" && mv "$REGISTRY.tmp" "$REGISTRY"
     reload_proxy
-    echo "Removed $name (project files, .php-version and .envrc left as they are)"
+    if [ "$type" = service ]; then
+        echo "Removed $name (data left in $IGOR_HOME/data/$name)"
+    else
+        echo "Removed $name (project files, .php-version and .envrc left as they are)"
+    fi
 }
 
 require_php_site() {
@@ -555,7 +671,8 @@ targets() {
     case "$name" in
         *:*) [ -f "$(plist "$(agent_name "$name")")" ] || die "no worker '$name'"
              agent_name "$name" ;;
-        *)   require_php_site "$name"; echo "$name"; site_workers "$name" ;;
+        *)   if [ "$(registry_field "$name" 3)" = service ]; then echo "$name"
+             else require_php_site "$name"; echo "$name"; site_workers "$name"; fi ;;
     esac
 }
 
@@ -564,7 +681,7 @@ control() {   # control start|stop|restart <name>
     list=$(targets "$name")
     # (re)generate a site's config on start/restart; a running site with a
     # changed config is restarted even on 'start'
-    if [ "$action" != stop ] && [[ "$name" != *:* ]]; then
+    if [ "$action" != stop ] && [ "$(registry_field "$name" 3)" = php ]; then
         write_site "$name"
         [ "$SITE_CHANGED" = 0 ] || agent_stop "$name"
     fi
@@ -580,12 +697,15 @@ cmd_stop()    { control stop "$@"; }
 cmd_restart() { control restart "$@"; }
 
 cmd_list() {
-    [ -s "$REGISTRY" ] || { echo "No sites yet - run 'igor add <name>' in a project."; return 0; }
+    [ -s "$REGISTRY" ] || { echo "Nothing yet - run 'igor add <name>' in a project."; return 0; }
     printf '%-28s %-6s %-6s %-8s %s\n' NAME PORT PHP STATE DIR
     local name port type php dir state w
     while IFS=$'\t' read -r name port type php dir; do
         if [ "$type" = proxy ]; then
             state=$(port_in_use "$port" && echo up || echo down)
+        elif [ "$type" = service ]; then
+            php=svc
+            state=$(is_running "$name" && echo running || echo stopped)
         else
             state=$(is_running "$name" && echo running || echo stopped)
         fi
@@ -611,6 +731,13 @@ cmd_info() {
     local name=${1:-} port
     [ -n "$(registry_get "$name")" ] || die "no site '$name'"
     port=$(registry_field "$name" 2)
+    if [ "$(registry_field "$name" 3)" = service ]; then
+        echo "Command:   $(plutil -extract ProgramArguments json -o - "$(plist "$name")" 2>/dev/null)"
+        echo "Data:      $(registry_field "$name" 5)"
+        echo "Log:       $LOGS/$name.log"
+        [ "$port" = - ] || echo "Browser:   https://$name.$TLD -> http://127.0.0.1:$port"
+        return 0
+    fi
     cat <<EOF
 Browser:   https://$name.$TLD
 Internal:  http://127.0.0.1:$port     (server-to-server, no TLS)
@@ -643,6 +770,7 @@ case "${1:-}" in
     reload)  shift; reload_proxy; echo "Front proxy reloaded" ;;
     shims)   shift; cmd_shims "$@" ;;
     workers) shift; cmd_workers "$@" ;;
+    service) shift; cmd_service "$@" ;;
     -h|--help|help|"") usage ;;
     *) usage; exit 1 ;;
 esac
