@@ -58,14 +58,13 @@ The tarball names follow the Linux pattern (`frankenphp-linux-arm64-php84.tar.gz
 
 ### Update
 
-Run the same commands again. The installer replaces `~/frankenphp/php8.x` and keeps the previous version as `~/frankenphp/php8.x.backup.<date>`. Delete those backups once the new version works. Then restart whatever runs on the old binaries:
+Run the same commands again. The installer replaces `~/frankenphp/php8.x` and keeps the previous version as `~/frankenphp/php8.x.backup.<date>`. Delete those backups once the new version works. Then restart everything that runs on the old binaries:
 
 ```bash
-for s in $(cut -f1,3 ~/.igor/sites.tsv | awk '$2 == "php" { print $1 }'); do igor restart "$s"; done
-launchctl kickstart -k gui/$(id -u)/dev.igor.proxy          # front proxy
+igor refresh --restart
 ```
 
-When the suite moves on to a new minor version (e.g. drops 8.4 and adds 8.6), change `.php-version` in the projects that still use the dropped one and re-add them (`igor rm <name> && igor add <name>`). The front proxy uses the newest runtime installed when you ran `igor setup`, so run `igor setup` again after removing that runtime.
+When the suite moves on to a new minor version (e.g. drops 8.4 and adds 8.6), change `.php-version` in the projects that still use the dropped one and run `igor refresh`. It moves those sites, their workers and the front proxy to the runtimes that are installed now.
 
 ### Requirements for the darwin build
 
@@ -92,10 +91,11 @@ igor service add redis -- redis-server    # background service, see below
 igor list
 igor stop portal / start portal / logs portal
 igor workers                              # sync Procfile.dev workers
+igor refresh                              # regenerate everything, restart what changed
 igor info sso                             # internal URL + .env hints
 ```
 
-`add` writes `.php-version` and an `.envrc`. Inside the project, `php`, `composer` and `frankenphp` then come from the shared runtime, and that includes Claude Code when you start it there. To switch a project's PHP version, edit `.php-version`, then run `igor rm <name> && igor add <name>`.
+`add` writes `.php-version` and an `.envrc`. Inside the project, `php`, `composer` and `frankenphp` then come from the shared runtime, and that includes Claude Code when you start it there. To switch a project's PHP version, edit `.php-version`, then run `igor refresh`.
 
 ## Workers (Reverb, queues, scheduler, ...)
 

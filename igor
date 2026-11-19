@@ -56,6 +56,10 @@ Usage: igor <command> [args]
   logs --clear [<name>]     empty one log, or all of them
   info <name>               URLs and .env hints for internal access
   reload                    reload the front proxy config
+  refresh [--restart]       regenerate all configs (PHP from each .php-version,
+                            Procfile.dev workers, routes, newest PHP for the
+                            proxy) and restart what changed; --restart
+                            restarts everything running (after a PHP update)
   shims                     (re)create php/composer/frankenphp shims in
                             $IGOR_HOME/bin, plus php84, composer85, ... per
                             installed version (rerun after installing one)
@@ -564,6 +568,85 @@ service_add() {
     check_alive "$name" "$offset"
 }
 
+# --- refresh -------------------------------------------------------------------
+
+registry_set() {   # registry_set <name> <column 1-5> <value>
+    awk -F'\t' -v OFS='\t' -v n="$1" -v c="$2" -v v="$3" '$1 == n { $c = v } { print }' \
+        "$REGISTRY" > "$REGISTRY.tmp" && mv "$REGISTRY.tmp" "$REGISTRY"
+}
+
+# bounce <agent> <changed> <force>: restart a running agent if its config
+# changed or if forced; a stopped agent stays stopped
+bounce() {
+    local agent=$1 changed=$2 force=$3
+    is_running "$agent" || return 0
+    [ "$changed" = 1 ] || [ "$force" = 1 ] || return 0
+    agent_stop "$agent"; agent_start "$agent"
+    echo "  restarted ${agent/@/:}"
+}
+
+cmd_refresh() {
+    local force=0 name port type php dir want w
+    case "${1:-}" in
+        --restart) force=1 ;;
+        "") ;;
+        *) die "usage: igor refresh [--restart]" ;;
+    esac
+    [ -f "$CADDYFILE" ] || die "run 'igor setup' first"
+
+    cmd_shims >/dev/null
+    info "Shims updated"
+
+    info "Front proxy (PHP $(newest_php))"
+    write_plist proxy "$IGOR_HOME" "$(php_bin "$(newest_php)"):/usr/bin:/bin:/usr/sbin:/sbin" \
+        "$(proxy_bin)" run --config "$CADDYFILE" --adapter caddyfile
+    bounce proxy "$PLIST_CHANGED" "$force"
+
+    # read the registry up front: the loop rewrites it
+    local entries
+    entries=$(cat "$REGISTRY")
+    while IFS=$'\t' read -r name port type php dir <&3; do
+        [ -n "$name" ] || continue
+        case "$type" in
+            php)
+                info "$name"
+                if [ ! -d "$dir" ]; then
+                    echo "  $dir is gone - skipped (igor rm $name)" >&2; continue
+                fi
+                want=""
+                [ -f "$dir/.php-version" ] && want=$(tr -d '[:space:]' < "$dir/.php-version")
+                if [ -n "$want" ] && [ "$want" != "$php" ]; then
+                    if [ -x "$(php_bin "$want")/frankenphp" ]; then
+                        registry_set "$name" 4 "$want"
+                        echo "  PHP $php -> $want (from .php-version)"
+                    else
+                        echo "  .php-version wants PHP $want, which is not installed - staying on $php" >&2
+                    fi
+                fi
+                write_site "$name"
+                write_route "$name" "$port"
+                bounce "$name" "$SITE_CHANGED" "$force"
+                sync_workers "$name" keep-stopped
+                if [ "$force" = 1 ]; then
+                    for w in $(site_workers "$name"); do bounce "$w" 0 1; done
+                fi
+                ;;
+            service)
+                info "$name (service)"
+                if [ "$port" != - ]; then write_route "$name" "$port"; else rm -f "$SITES_DIR/$name.caddy"; fi
+                bounce "$name" 0 "$force"
+                ;;
+            proxy)
+                write_route "$name" "$port"
+                ;;
+        esac
+    done 3<<< "$entries"
+
+    reload_proxy
+    echo ""
+    cmd_list
+}
+
 # --- workers (Procfile.dev) --------------------------------------------------
 # A worker is a launchd agent named "<site>@<worker>"; users write <site>:<worker>.
 
@@ -591,8 +674,10 @@ write_worker_runner() {
     if cmp -s "$f.tmp" "$f"; then rm -f "$f.tmp"; else mv "$f.tmp" "$f"; chmod +x "$f"; fi
 }
 
-sync_workers() {   # sync_workers <site>
-    local site=$1 dir php procfile line wname cmd agent keep=""
+# sync_workers <site> [keep-stopped]: with keep-stopped, a worker that exists
+# but is stopped stays stopped (new workers still start)
+sync_workers() {
+    local site=$1 mode=${2:-} dir php procfile line wname cmd agent keep="" existed running
     dir=$(registry_field "$site" 5)
     php=$(registry_field "$site" 4)
     procfile="$dir/Procfile.dev"
@@ -607,6 +692,8 @@ sync_workers() {   # sync_workers <site>
             wname=${BASH_REMATCH[1]}; cmd=${BASH_REMATCH[2]}
             agent="$site@$wname"
             keep="$keep $agent "
+            existed=0; [ -f "$(plist "$agent")" ] && existed=1
+            running=0; is_running "$agent" && running=1
             write_plist "$agent" "$dir" \
                 "$(php_bin "$php"):$dir/vendor/bin:$dir/node_modules/.bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
                 "$SHIM_DIR/igor-worker" "$cmd"
@@ -614,7 +701,9 @@ sync_workers() {   # sync_workers <site>
                 agent_stop "$agent"
                 echo "  $site:$wname  $cmd"
             fi
-            agent_start "$agent"
+            if [ "$mode" != keep-stopped ] || [ "$existed" = 0 ] || [ "$running" = 1 ]; then
+                agent_start "$agent"
+            fi
         done 3< "$procfile"
     fi
 
@@ -793,6 +882,7 @@ case "${1:-}" in
     reload)  shift; reload_proxy; echo "Front proxy reloaded" ;;
     shims)   shift; cmd_shims "$@" ;;
     workers) shift; cmd_workers "$@" ;;
+    refresh) shift; cmd_refresh "$@" ;;
     service) shift; cmd_service "$@" ;;
     -h|--help|help|"") usage ;;
     *) usage; exit 1 ;;
