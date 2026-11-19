@@ -39,9 +39,13 @@ Usage: igor <command> [args]
   proxy <name> <port>       route https://<name>.$TLD to a service you run
                             yourself (Reverb, Mailpit UI, Vite, ...)
   rm <name>                 remove a site (project files are not touched)
-  start|stop|restart <name> control a site's FrankenPHP server
-  list                      all sites with port, PHP version and state
-  logs <name>               follow a site's log (use "proxy" for the front proxy)
+  workers [<name>]          start the site's Procfile.dev processes (reverb,
+                            queue, ...) and keep them running; rerun after
+                            editing Procfile.dev
+  start|stop|restart <name> control a site and its workers
+                            (<name>:<worker> for a single worker)
+  list                      all sites and workers with port, PHP version and state
+  logs <name>               follow a log (<name>:<worker>, or "proxy")
   info <name>               URLs and .env hints for internal access
   reload                    reload the front proxy config
   shims                     (re)create php/composer/frankenphp shims in
@@ -106,9 +110,13 @@ xml_escape() {
 }
 
 # write_plist <name> <workdir> <PATH> <args...>
+# Leaves an identical plist untouched (macOS shows a "Background Activity"
+# banner whenever one changes) and sets PLIST_CHANGED to 1 or 0.
+PLIST_CHANGED=0
 write_plist() {
-    local name=$1 workdir=$2 path=$3 arg
+    local name=$1 workdir=$2 path=$3 arg f
     shift 3
+    f=$(plist "$name")
     mkdir -p "$AGENTS" "$LOGS"
     {
         cat <<EOF
@@ -140,7 +148,12 @@ EOF
 </dict>
 </plist>
 EOF
-    } > "$(plist "$name")"
+    } > "$f.tmp"
+    if cmp -s "$f.tmp" "$f"; then
+        rm -f "$f.tmp"; PLIST_CHANGED=0
+    else
+        mv "$f.tmp" "$f"; PLIST_CHANGED=1
+    fi
 }
 
 agent_start() {
@@ -211,7 +224,7 @@ EOF
         for t in php composer frankenphp; do ln -s igor-shim "$SHIM_DIR/$t$short"; done
     done
 
-    echo "Shims in $SHIM_DIR: $(cd "$SHIM_DIR" && ls | grep -v igor-shim | tr '\n' ' ')"
+    echo "Shims in $SHIM_DIR: $(cd "$SHIM_DIR" && ls | grep -v "^igor-" | tr '\n' ' ')"
     case ":$PATH:" in
         *":$SHIM_DIR:"*) ;;
         *) echo "Put them first on PATH, at the end of ~/.zshrc (after Herd's lines):"
@@ -365,6 +378,10 @@ EOF
     write_route "$name" "$port"
     agent_start "$name"
     reload_proxy
+    if [ -f "$dir/Procfile.dev" ]; then
+        echo "Workers from Procfile.dev:"
+        sync_workers "$name"
+    fi
 
     cat <<EOF
 https://$name.$TLD  ->  http://127.0.0.1:$port  (PHP $php)
@@ -384,9 +401,91 @@ cmd_proxy() {
     echo "https://$name.$TLD  ->  http://127.0.0.1:$port  (you run the service yourself)"
 }
 
+# --- workers (Procfile.dev) --------------------------------------------------
+# A worker is a launchd agent named "<site>@<worker>"; users write <site>:<worker>.
+
+agent_name() { echo "${1/:/@}"; }
+
+site_workers() {   # worker agent names of a site, e.g. "portal@queue"
+    local f
+    for f in "$AGENTS/$(label "$1")@"*.plist; do
+        [ -e "$f" ] || continue
+        f=${f##*/}; f=${f%.plist}; echo "${f#"$LABEL_PREFIX".}"
+    done
+}
+
+remove_agent() {
+    agent_stop "$1"
+    rm -f "$(plist "$1")"
+}
+
+# Workers start through this script, so macOS names it (not "bash") in its
+# background-activity banners.
+write_worker_runner() {
+    local f="$SHIM_DIR/igor-worker"
+    mkdir -p "$SHIM_DIR"
+    printf '#!/bin/bash\n# igor: runs one Procfile.dev line\nexec /bin/bash -c "$1"\n' > "$f.tmp"
+    if cmp -s "$f.tmp" "$f"; then rm -f "$f.tmp"; else mv "$f.tmp" "$f"; chmod +x "$f"; fi
+}
+
+sync_workers() {   # sync_workers <site>
+    local site=$1 dir php procfile line wname cmd agent keep=""
+    dir=$(registry_field "$site" 5)
+    php=$(registry_field "$site" 4)
+    procfile="$dir/Procfile.dev"
+
+    if [ -f "$procfile" ]; then
+        write_worker_runner
+        while IFS= read -r line <&3 || [ -n "$line" ]; do
+            line=${line%$'\r'}
+            [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+            [[ "$line" =~ ^([A-Za-z0-9_-]+):[[:space:]]*(.+)$ ]] ||
+                die "Procfile.dev: can't read '$line' (expected 'name: command')"
+            wname=${BASH_REMATCH[1]}; cmd=${BASH_REMATCH[2]}
+            agent="$site@$wname"
+            keep="$keep $agent "
+            write_plist "$agent" "$dir" \
+                "$(php_bin "$php"):$dir/vendor/bin:$dir/node_modules/.bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+                "$SHIM_DIR/igor-worker" "$cmd"
+            if [ "$PLIST_CHANGED" = 1 ]; then
+                agent_stop "$agent"
+                echo "  $site:$wname  $cmd"
+            fi
+            agent_start "$agent"
+        done 3< "$procfile"
+    fi
+
+    for agent in $(site_workers "$site"); do
+        case "$keep" in
+            *" $agent "*) ;;
+            *) remove_agent "$agent"; echo "  $site:${agent#*@}  removed" ;;
+        esac
+    done
+}
+
+site_for_dir() {
+    awk -F'\t' -v d="$1" '$5 == d && $3 == "php" { print $1 }' "$REGISTRY" 2>/dev/null || true
+}
+
+cmd_workers() {
+    local site=${1:-}
+    [ -n "$site" ] || site=$(site_for_dir "$(pwd)")
+    [ -n "$site" ] || die "this folder is not an igor site - run 'igor add <name>' first, or 'igor workers <name>'"
+    require_php_site "$site"
+    [ -f "$(registry_field "$site" 5)/Procfile.dev" ] ||
+        echo "No Procfile.dev in $(registry_field "$site" 5) - removing any workers of $site"
+    sync_workers "$site"
+    local w
+    for w in $(site_workers "$site"); do
+        printf '  %-36s %s\n' "${w/@/:}" "$(is_running "$w" && echo running || echo stopped)"
+    done
+}
+
 cmd_rm() {
     local name=${1:-}
     [ -n "$(registry_get "$name")" ] || die "no site '$name'"
+    local w
+    for w in $(site_workers "$name"); do remove_agent "$w"; done
     agent_stop "$name"
     rm -f "$(plist "$name")" "$SITES_DIR/$name.caddy"
     awk -F'\t' -v n="$name" '$1 != n' "$REGISTRY" > "$REGISTRY.tmp" && mv "$REGISTRY.tmp" "$REGISTRY"
@@ -399,14 +498,34 @@ require_php_site() {
     [ "$(registry_field "$1" 3)" = php ] || die "'$1' is a proxy route - start that service yourself"
 }
 
-cmd_start()   { require_php_site "${1:-}"; agent_start "$1"; echo "$1 started"; }
-cmd_stop()    { require_php_site "${1:-}"; agent_stop "$1"; echo "$1 stopped"; }
-cmd_restart() { require_php_site "${1:-}"; agent_stop "$1"; agent_start "$1"; echo "$1 restarted"; }
+# targets <name> | <name>:<worker> -> agent names (the site and all its workers)
+targets() {
+    local name=${1:-}
+    case "$name" in
+        *:*) [ -f "$(plist "$(agent_name "$name")")" ] || die "no worker '$name'"
+             agent_name "$name" ;;
+        *)   require_php_site "$name"; echo "$name"; site_workers "$name" ;;
+    esac
+}
+
+control() {   # control start|stop|restart <name>
+    local action=$1 name=${2:-} list a
+    list=$(targets "$name")
+    for a in $list; do
+        [ "$action" = start ] || agent_stop "$a"
+        [ "$action" = stop ]  || agent_start "$a"
+    done
+    echo "$name ${action/%p/pp}ed"
+}
+
+cmd_start()   { control start "$@"; }
+cmd_stop()    { control stop "$@"; }
+cmd_restart() { control restart "$@"; }
 
 cmd_list() {
     [ -s "$REGISTRY" ] || { echo "No sites yet - run 'igor add <name>' in a project."; return 0; }
     printf '%-28s %-6s %-6s %-8s %s\n' NAME PORT PHP STATE DIR
-    local name port type php dir state
+    local name port type php dir state w
     while IFS=$'\t' read -r name port type php dir; do
         if [ "$type" = proxy ]; then
             state=$(port_in_use "$port" && echo up || echo down)
@@ -414,6 +533,10 @@ cmd_list() {
             state=$(is_running "$name" && echo running || echo stopped)
         fi
         printf '%-28s %-6s %-6s %-8s %s\n' "$name" "$port" "$php" "$state" "$dir"
+        [ "$type" = php ] || continue
+        for w in $(site_workers "$name"); do
+            printf '  %-26s %-6s %-6s %-8s\n' ":${w#*@}" "" "" "$(is_running "$w" && echo running || echo stopped)"
+        done
     done < "$REGISTRY"
     echo ""
     echo "Front proxy: $(is_running proxy && echo running || echo stopped)"
@@ -422,7 +545,8 @@ cmd_list() {
 cmd_logs() {
     local name=${1:-}
     [ -n "$name" ] || die "usage: igor logs <name|proxy>"
-    [ -f "$LOGS/$name.log" ] || die "no log for '$name' yet"
+    name=$(agent_name "$name")
+    [ -f "$LOGS/$name.log" ] || die "no log for '${1}' yet"
     tail -f "$LOGS/$name.log"
 }
 
@@ -461,6 +585,7 @@ case "${1:-}" in
     info)    shift; cmd_info "$@" ;;
     reload)  shift; reload_proxy; echo "Front proxy reloaded" ;;
     shims)   shift; cmd_shims "$@" ;;
+    workers) shift; cmd_workers "$@" ;;
     -h|--help|help|"") usage ;;
     *) usage; exit 1 ;;
 esac

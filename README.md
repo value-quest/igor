@@ -10,6 +10,19 @@ Browser ──https://app.test──▶ front proxy (Caddy local CA, :80/:443)
 App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like prod)
 ```
 
+## Contents
+
+- [PHP runtimes (ValueQuest FrankenPHP suite)](#php-runtimes-valuequest-frankenphp-suite)
+  - [Install](#install)
+  - [Update](#update)
+  - [Requirements for the darwin build](#requirements-for-the-darwin-build)
+- [Setup (once)](#setup-once)
+- [Daily use](#daily-use)
+- [Workers (Reverb, queues, scheduler, ...)](#workers-reverb-queues-scheduler-)
+- [PHP on the command line](#php-on-the-command-line)
+- [Files](#files)
+- [Notes](#notes)
+
 ## PHP runtimes (ValueQuest FrankenPHP suite)
 
 igor uses the darwin builds from [value-quest/franken-php](https://github.com/value-quest/franken-php), installed side by side with `--versioned`:
@@ -77,10 +90,35 @@ igor proxy reverb 8080                    # route to a service you run yourself
 igor proxy mail 8025                      # Mailpit UI
 igor list
 igor stop portal / start portal / logs portal
+igor workers                              # sync Procfile.dev workers
 igor info sso                             # internal URL + .env hints
 ```
 
 `add` writes `.php-version` and an `.envrc`. Inside the project, `php`, `composer` and `frankenphp` then come from the shared runtime, and that includes Claude Code when you start it there. To switch a project's PHP version, edit `.php-version`, then run `igor rm <name> && igor add <name>`.
+
+## Workers (Reverb, queues, scheduler, ...)
+
+Long-running commands go in a `Procfile.dev` in the project root, one `name: command` per line:
+
+```
+reverb:   php artisan reverb:start
+queue:    php artisan queue:listen --tries=3
+schedule: php artisan schedule:work
+```
+
+`igor add` starts them along with the site. After you edit the file, run `igor workers` in the project (or `igor workers <name>` from anywhere). That starts new lines, restarts changed ones, and removes deleted ones.
+
+Each worker is a LaunchAgent, like the site itself. It starts at login and restarts when it exits, at most once every 10 seconds. Commands run in the project folder through bash, with the site's PHP first on PATH, followed by `vendor/bin` and `node_modules/.bin`.
+
+```bash
+igor list                       # workers appear under their site
+igor logs portal:reverb         # ~/.igor/logs/portal@reverb.log
+igor restart portal:queue       # one worker
+igor restart portal             # the site and all its workers
+igor stop portal                # same for stop/start
+```
+
+Locally, prefer `queue:listen` over `queue:work`: it picks up code changes without a restart. Only list commands that keep running. A command that exits is started again every 10 seconds.
 
 ## PHP on the command line
 
@@ -106,12 +144,12 @@ Run `igor shims` again after you install or remove a runtime, so the numbered co
 | `~/.igor/sites.tsv` | registry: name, port, type, PHP version, folder |
 | `~/.igor/Caddyfile`, `~/.igor/sites/*.caddy` | front proxy config, one route per site |
 | `~/.igor/php/99-igor.ini` | shared php.ini settings (web and CLI, via `PHP_INI_SCAN_DIR`) |
-| `~/.igor/logs/` | one log per site, plus `proxy.log` |
-| `~/Library/LaunchAgents/dev.igor.*.plist` | LaunchAgents: start at login, restart if they crash |
+| `~/.igor/logs/` | one log per site and per worker (`<site>@<worker>.log`), plus `proxy.log` |
+| `~/Library/LaunchAgents/dev.igor.*.plist` | LaunchAgents for the proxy, sites and workers (`<site>@<worker>`): start at login, restart if they crash |
 
 ## Notes
 
 - Sites start at login. Stop the ones you don't need with `igor stop`; an idle php-server uses a few tens of MB.
-- Queue workers, the scheduler and Vite are not managed here. Run them per project, e.g. with `composer dev`.
+- Logs are not rotated. Truncate a busy one with `: > ~/.igor/logs/<file>.log`.
 - The front proxy listens on all interfaces, so sites are reachable from your LAN unless the macOS firewall blocks them. Binding only to 127.0.0.1 on ports 80/443 needs root on macOS.
 - The script targets the bash 3.2 that ships with macOS and needs nothing else.
