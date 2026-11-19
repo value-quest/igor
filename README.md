@@ -2,7 +2,7 @@
 
 _Frankenstein's assistant: it serves your Laravel projects through FrankenPHP so you don't have to._
 
-Local Laravel sites on macOS with the ValueQuest FrankenPHP suite. It replaces Herd and mirrors prod: a central Caddy proxy in front of one FrankenPHP backend per app.
+Local Laravel sites on macOS with the ValueQuest FrankenPHP suite. It replaces Herd and with a central Caddy proxy in front of one FrankenPHP backend per app.
 
 ```
 Browser ──https://app.test──▶ front proxy (Caddy local CA, :80/:443)
