@@ -184,6 +184,6 @@ Run `igor shims` again after you install or remove a runtime, so the numbered co
 
 - Sites start at login. Stop the ones you don't need with `igor stop`; an idle FrankenPHP server uses a few tens of MB.
 - PHP sees every request as HTTPS (`HTTPS=on`), so Laravel generates `https://` URLs and assets behind the front proxy without trusting any proxy. That includes direct calls to `http://127.0.0.1:<port>`. The client IP is still `127.0.0.1`.
-- Logs are not rotated. Truncate a busy one with `: > ~/.igor/logs/<file>.log`.
+- Logs are not rotated. `igor logs --clear <name>` empties one (`portal:queue` for a worker), `igor logs --clear` all of them. Running services keep logging into the emptied file.
 - The front proxy listens on all interfaces, so sites are reachable from your LAN unless the macOS firewall blocks them. Binding only to 127.0.0.1 on ports 80/443 needs root on macOS.
 - The script targets the bash 3.2 that ships with macOS and needs nothing else.

@@ -53,6 +53,7 @@ Usage: igor <command> [args]
                             (<name>:<worker> for a single worker)
   list                      all sites, workers, services and routes with state
   logs <name>               follow a log (<name>:<worker>, or "proxy")
+  logs --clear [<name>]     empty one log, or all of them
   info <name>               URLs and .env hints for internal access
   reload                    reload the front proxy config
   shims                     (re)create php/composer/frankenphp shims in
@@ -720,11 +721,33 @@ cmd_list() {
 }
 
 cmd_logs() {
-    local name=${1:-}
-    [ -n "$name" ] || die "usage: igor logs <name|proxy>"
-    name=$(agent_name "$name")
-    [ -f "$LOGS/$name.log" ] || die "no log for '${1}' yet"
-    tail -f "$LOGS/$name.log"
+    local name="" clear=0 f
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --clear) clear=1; shift ;;
+            -*)      die "unknown option $1" ;;
+            *)       [ -z "$name" ] || die "unexpected argument '$1'"; name=$1; shift ;;
+        esac
+    done
+
+    if [ "$clear" = 1 ]; then
+        # truncate, don't delete: launchd keeps the files open and appends
+        if [ -z "$name" ]; then
+            for f in "$LOGS"/*.log; do [ -e "$f" ] && : > "$f"; done
+            echo "Cleared all logs in $LOGS"
+        else
+            f="$LOGS/$(agent_name "$name").log"
+            [ -f "$f" ] || die "no log for '$name'"
+            : > "$f"
+            echo "Cleared $f"
+        fi
+        return 0
+    fi
+
+    [ -n "$name" ] || die "usage: igor logs <name|proxy>  or  igor logs --clear [<name>]"
+    f="$LOGS/$(agent_name "$name").log"
+    [ -f "$f" ] || die "no log for '$name' yet"
+    tail -f "$f"
 }
 
 cmd_info() {
