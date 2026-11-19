@@ -37,12 +37,12 @@ All projects share these two runtimes. Each project picks one in its `.php-versi
 ### Install and update
 
 ```bash
-igor update --check     # latest release vs. what's installed
+igor update --check     # installed PHP and build vs. the latest release
 igor update             # install/update, then restart everything on the new binaries
 igor update --force     # reinstall even if up to date
 ```
 
-`igor update` asks GitHub for the latest release and downloads `frankenphp-darwin-<arch>-php8x.tar.gz` for every PHP version the release ships. It runs each archive's `install.sh --versioned 8.x`, checks that `php` and `frankenphp` run, and records the release in `~/frankenphp/php8.x/.igor-release`. Then it runs `igor refresh --restart`. On a new Mac, run it before `igor setup`.
+`igor update` asks GitHub for the latest release and downloads `frankenphp-darwin-<arch>-php8x.tar.gz` for every PHP version the release ships. It runs each archive's `install.sh --versioned 8.x`, checks that `php` and `frankenphp` run, and records the build in `~/frankenphp/php8.x/.igor-release`: the release tag plus the archive's upload time. The tag is the FrankenPHP version, and a new PHP patch release (e.g. 8.5.13) is uploaded into the same release again, so igor compares upload times, not just tags. Then it runs `igor refresh --restart`. On a new Mac, run it before `igor setup`.
 
 The installer keeps the previous version as `~/frankenphp/php8.x.backup.<date>`, and igor keeps only the newest of those backups. To roll back, move the backup back to `php8.x` and run `igor refresh --restart`.
 
