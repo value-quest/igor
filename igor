@@ -66,6 +66,9 @@ Usage: igor <command> [args]
   logs --clear [<name>]     empty one log, or all of them
   info <name>               URLs and .env hints for internal access
   reload                    reload the front proxy config
+  update [--check] [--force]
+                            install the latest FrankenPHP suite release for
+                            every PHP version it ships, then refresh --restart
   refresh [--restart]       regenerate all configs (PHP from each .php-version,
                             Procfile.dev workers, routes, newest PHP for the
                             proxy) and restart what changed; --restart
@@ -770,6 +773,122 @@ services_export() {
     done
 }
 
+# --- update (FrankenPHP suite) ---------------------------------------------------
+# Installs the latest suite release with its own install.sh --versioned.
+# The suite rebuilds and re-uploads its archives daily into a release tagged
+# with the FrankenPHP version, so igor compares versions, not tags or upload
+# times: the release's versions.json ({"frankenphp": "1.13.5", "php85":
+# "8.5.13", ...}) against the installed PHP and php8.x/.igor-release
+# ("tag=v1.13.5 frankenphp=1.13.5 php=8.5.13"; the binary doesn't know its
+# FrankenPHP version). Without versions.json only a new tag counts as an update.
+
+SUITE_REPO="${IGOR_SUITE_REPO:-value-quest/franken-php}"
+
+json_get() { plutil -extract "$1" raw -o - - <<< "$2" 2>/dev/null || true; }   # json_get <path> <json>; "" if absent
+
+marker_get() {     # marker_get <8.x> <key>
+    local kv
+    for kv in $(cat "$PHP_ROOT/php$1/.igor-release" 2>/dev/null); do
+        [ "${kv%%=*}" = "$2" ] && { echo "${kv#*=}"; return 0; }
+    done
+    return 0
+}
+installed_php() { "$PHP_ROOT/php$1/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || true; }
+
+cmd_update() {
+    local check=0 force=0 arch json tag n i aname versions="" fp_avail
+    local v short avail inst_php inst_fp pending="" tmp b got shorts=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --check) check=1; shift ;;
+            --force) force=1; shift ;;
+            *) die "usage: igor update [--check] [--force]" ;;
+        esac
+    done
+
+    case "$(uname -m)" in
+        arm64)  arch=arm64 ;;
+        x86_64) arch=amd64 ;;
+        *)      die "unsupported architecture $(uname -m)" ;;
+    esac
+
+    json=$(curl -fsSL "https://api.github.com/repos/$SUITE_REPO/releases/latest") ||
+        die "could not reach GitHub for $SUITE_REPO"
+    tag=$(json_get tag_name "$json")
+    [[ "$tag" =~ ^v?[0-9][0-9A-Za-z.+-]*$ ]] || die "unexpected release tag '$tag'"
+    n=$(json_get assets "$json"); n=${n:-0}
+    for ((i = 0; i < n; i++)); do
+        aname=$(json_get "assets.$i.name" "$json")
+        [[ "$aname" =~ ^frankenphp-darwin-$arch-(php[0-9]+)\.tar\.gz$ ]] && shorts="$shorts ${BASH_REMATCH[1]}"
+        [ "$aname" = versions.json ] && versions=$(curl -fsSL \
+            "https://github.com/$SUITE_REPO/releases/download/$tag/versions.json" || true)
+    done
+    [ -n "$shorts" ] || die "release $tag has no darwin-$arch builds"
+    fp_avail=$(json_get frankenphp "$versions")
+
+    echo "Latest suite release: $tag ($SUITE_REPO)${fp_avail:+, FrankenPHP $fp_avail}"
+    [ -n "$versions" ] || echo "  (no versions.json in this release - only a new tag counts as an update)"
+    printf '  %-6s %-24s %s\n' PHP INSTALLED AVAILABLE
+    for short in $shorts; do
+        v="${short:3:1}.${short:4}"            # php84 -> 8.4
+        avail=$(json_get "$short" "$versions")
+        inst_php=$(installed_php "$v")
+        inst_fp=$(marker_get "$v" frankenphp)
+        if [ ! -d "$PHP_ROOT/php$v" ]; then
+            printf '  %-6s %-24s %s\n' "$v" "not installed" "${avail:-$tag}"
+            pending="$pending $v"; continue
+        fi
+        if [ -n "$avail" ]; then b="$avail (FrankenPHP $fp_avail)"; else b=$tag; fi
+        printf '  %-6s %-24s %s\n' "$v" "${inst_php:-?} (FrankenPHP ${inst_fp:-?})" "$b"
+        if [ "$force" = 1 ]; then
+            pending="$pending $v"
+        elif [ -n "$avail" ] && [ -n "$fp_avail" ]; then
+            [ "$inst_php" = "$avail" ] && [ "$inst_fp" = "$fp_avail" ] || pending="$pending $v"
+        else
+            [ "$(marker_get "$v" tag)" = "$tag" ] || pending="$pending $v"
+        fi
+    done
+
+    if [ -z "$pending" ]; then echo "Up to date."; return 0; fi
+    if [ "$check" = 1 ]; then echo "Run 'igor update' to install PHP$pending."; return 0; fi
+
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/igor-update.XXXXXX")
+    trap 'rm -rf "$tmp"' EXIT
+    for v in $pending; do
+        short="php${v/./}"
+        info "PHP $v: downloading $tag"
+        curl -fL --retry 2 -o "$tmp/$short.tar.gz" \
+            "https://github.com/$SUITE_REPO/releases/download/$tag/frankenphp-darwin-$arch-$short.tar.gz" ||
+            die "download failed for PHP $v"
+        mkdir "$tmp/$short"
+        tar -xzf "$tmp/$short.tar.gz" -C "$tmp/$short"
+        [ -x "$tmp/$short/install.sh" ] || die "no install.sh in the PHP $v archive"
+
+        info "PHP $v: installing"
+        "$tmp/$short/install.sh" --versioned "$v"
+        "$PHP_ROOT/php$v/bin/frankenphp" version >/dev/null && got=$(installed_php "$v") && [ -n "$got" ] ||
+            die "PHP $v does not run after the install - the previous version is in $PHP_ROOT/php$v.backup.*"
+        avail=$(json_get "$short" "$versions")
+        if [ -n "$avail" ] && [ "$got" != "$avail" ]; then
+            echo "  note: versions.json says $avail, the installed binary is $got (release changed during download?)" >&2
+        fi
+        echo "tag=$tag frankenphp=${fp_avail:-unknown} php=$got" > "$PHP_ROOT/php$v/.igor-release"
+        echo "  PHP $got, FrankenPHP ${fp_avail:-?}"
+
+        # keep only the newest backup the installer made
+        for b in $(ls -dt "$PHP_ROOT/php$v.backup."* 2>/dev/null | tail -n +2); do
+            [[ "$b" == "$PHP_ROOT/php$v.backup."* ]] && rm -rf "$b"
+        done
+    done
+
+    if [ ! -f "$CADDYFILE" ]; then
+        echo "Installed. Next: igor setup"
+        return 0
+    fi
+    info "Restarting everything on the new binaries"
+    cmd_refresh --restart
+}
+
 # --- workers (Procfile.dev) --------------------------------------------------
 # A worker is a launchd agent named "<site>@<worker>"; users write <site>:<worker>.
 
@@ -1038,6 +1157,7 @@ case "${1:-}" in
     shims)   shift; cmd_shims "$@" ;;
     workers) shift; cmd_workers "$@" ;;
     refresh) shift; cmd_refresh "$@" ;;
+    update)  shift; cmd_update "$@" ;;
     service) shift; cmd_service "$@" ;;
     services) shift; cmd_services "$@" ;;
     -h|--help|help|"") usage ;;
