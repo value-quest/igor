@@ -639,7 +639,7 @@ service_add() {
     PLIST_ENV="$envs" write_plist "$name" "$data" \
         "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$exe" "$@"
     local offset
-    offset=$(wc -c < "$LOGS/$name.log" 2>/dev/null || echo 0)
+    offset=$({ wc -c < "$LOGS/$name.log"; } 2>/dev/null || echo 0)
     [ "$PLIST_CHANGED" = 0 ] || agent_stop "$name"
     agent_start "$name"
 
