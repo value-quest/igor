@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main, go-rewrite]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet -mod=readonly ./...
+
+      - name: Test (unit + bash backwards-compatibility)
+        run: go test -mod=readonly -race -v ./...
+
+      - name: Build
+        run: make build && ./igor --version

@@ -23,23 +23,17 @@ App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like
 - [PHP on the command line](#php-on-the-command-line)
 - [PHP runtimes (ValueQuest FrankenPHP suite)](#php-runtimes-valuequest-frankenphp-suite)
   - [Requirements for the darwin build](#requirements-for-the-darwin-build)
+- [Development & Releases](#development--releases)
 - [Files](#files)
 - [Notes](#notes)
 
 ## Install and setup
 
-You need macOS with [Homebrew](https://brew.sh). igor is a single native Go binary built with [Cobra](https://github.com/spf13/cobra) and [Charmbracelet Huh / Lipgloss](https://charm.sh) — zero runtime dependencies.
+You need macOS with [Homebrew](https://brew.sh). igor is a single native Go binary with zero runtime dependencies.
 
 ```bash
-# Build from source (requires Go 1.24+)
-make build                                # produces ./igor
-ln -s ~/igor/igor ~/bin/igor              # or any folder on your PATH
-```
-
-```bash
-# 1. get igor and put it on your PATH
-git clone https://github.com/value-quest/igor.git ~/igor
-ln -s ~/igor/igor ~/bin/igor              # or any folder on your PATH
+# 1. install igor via Homebrew
+brew install value-quest/tap/igor
 
 # 2. install the PHP runtimes (no sudo)
 igor install
@@ -54,6 +48,18 @@ echo 'export PATH="$HOME/.igor/bin:$PATH"' >> ~/.zshrc   # last line, after Herd
 # 5. serve your first project
 cd ~/Code/portal && igor add portal       # https://portal.test
 ```
+
+<details><summary>Installing from GitHub Releases or building from source</summary>
+
+Download a prebuilt macOS binary (`igor-darwin-arm64` or `igor-darwin-amd64`) from [GitHub Releases](https://github.com/value-quest/igor/releases), or build locally with Go 1.24+:
+
+```bash
+git clone https://github.com/value-quest/igor.git ~/igor
+cd ~/igor && make build
+ln -s ~/igor/igor ~/bin/igor              # or any folder on your PATH
+```
+
+</details>
 
 **`igor install`** downloads the latest [FrankenPHP suite](#php-runtimes-valuequest-frankenphp-suite) release for every PHP version it ships (currently 8.4 and 8.5) into `~/frankenphp/php8.x`. It runs each archive's own `install.sh --versioned 8.x` and checks that `php` and `frankenphp` start. Run it as your normal user, without sudo.
 
@@ -95,7 +101,7 @@ Your sites, configs and service data stay as they are in between. dnsmasq keeps 
 igor update --check     # installed vs. available PHP and FrankenPHP versions, changes nothing
 igor update             # install what's new, then restart everything on it
 igor update --force     # reinstall even if up to date, e.g. after a build fix
-git -C ~/igor pull      # igor itself
+brew upgrade igor       # update igor itself (or `igor self-update` for standalone binaries)
 ```
 
 **`igor update`** compares your runtimes with the latest suite release, installs only what changed and then runs `igor refresh --restart`. That restarts the proxy, sites, workers and services on the new binaries. It's the same command as `igor install`; only the name differs.
@@ -133,6 +139,7 @@ igor workers                              # sync Procfile.dev workers by hand
 igor refresh portal                       # same as the watcher, by hand
 igor refresh                              # regenerate everything, restart what changed
 igor info sso                             # internal URL + .env hints
+igor doctor                               # check dnsmasq, resolver, proxy, Herd, runtimes & sites
 ```
 
 `add` serves `public/` if the project has one (Laravel, Symfony, Slim, ...) and the project folder itself otherwise. For anything else, pass `--docroot` with a folder inside the project, e.g. `--docroot web`. Requests for files that don't exist go to the document root's `index.php`, which is what front controllers and WordPress permalinks need. To change the document root, run `igor rm <name>` and add the site again.
@@ -244,6 +251,26 @@ All projects share these two runtimes. Each project picks one in its `.php-versi
 ### Requirements for the darwin build
 
 Each binary must run straight from its folder. On macOS that means dylibs in `../lib`, found through an `@executable_path/../lib` rpath, instead of the `LD_LIBRARY_PATH` wrappers used on Linux. igor never calls a binary from a project folder.
+
+## Development & Releases
+
+```bash
+make test       # runs unit tests + byte-for-byte backwards-compatibility tests against `main`
+make build      # builds ./igor for your current macOS architecture
+make dist       # cross-compiles dist/igor-darwin-{arm64,amd64}
+```
+
+Releases are automated via [GoReleaser](.goreleaser.yaml) and [GitHub Actions](.github/workflows/release.yml):
+
+1. Create a `value-quest/homebrew-tap` repository on GitHub (if it doesn't exist yet).
+2. Add a `HOMEBREW_TAP_GITHUB_TOKEN` repository secret (a PAT with `repo` / `contents:write` access to `value-quest/homebrew-tap`).
+3. Push a version tag:
+
+```bash
+git tag v2.0.0 && git push --tags
+```
+
+GoReleaser builds signed-ready macOS `arm64`/`amd64` binaries (`igor-darwin-arm64`, `igor-darwin-amd64` for `igor self-update`, plus `.tar.gz` archives), publishes the GitHub Release, and updates `Formula/igor.rb` in `value-quest/homebrew-tap`.
 
 ## Files
 
