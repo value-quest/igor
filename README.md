@@ -17,6 +17,7 @@ App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like
 - [Update](#update)
   - [New and dropped PHP versions](#new-and-dropped-php-versions)
 - [Daily use](#daily-use)
+  - [Switching a project's PHP version](#switching-a-projects-php-version)
 - [Workers (Reverb, queues, scheduler, ...)](#workers-reverb-queues-scheduler-)
 - [Services (Redis, Mailpit, S3)](#services-redis-mailpit-s3)
 - [PHP on the command line](#php-on-the-command-line)
@@ -99,7 +100,7 @@ The installer keeps the previous version as `~/frankenphp/php8.x.backup.<date>`,
 
 ### New and dropped PHP versions
 
-When the suite adds a minor version (e.g. 8.6), `igor update` installs it next to the others. Switch a project by changing its `.php-version` and running `igor refresh`.
+When the suite adds a minor version (e.g. 8.6), `igor update` installs it next to the others. Switch a project by changing its `.php-version` and running `igor refresh` (see [Switching a project's PHP version](#switching-a-projects-php-version)).
 
 When the suite drops a version, `igor update --check` lists it as "no longer in the release". Move its projects to another version, then remove it:
 
@@ -127,7 +128,23 @@ igor info sso                             # internal URL + .env hints
 
 `add` serves `public/` if the project has one (Laravel, Symfony, Slim, ...) and the project folder itself otherwise. For anything else, pass `--docroot` with a folder inside the project, e.g. `--docroot web`. Requests for files that don't exist go to the document root's `index.php`, which is what front controllers and WordPress permalinks need. To change the document root, run `igor rm <name>` and add the site again.
 
-`add` writes `.php-version` and an `.envrc`. Inside the project, `php`, `composer` and `frankenphp` then come from the shared runtime, and that includes Claude Code when you start it there. To switch a project's PHP version, edit `.php-version`, then run `igor refresh`.
+`add` writes `.php-version` and an `.envrc`. Inside the project, `php`, `composer` and `frankenphp` then come from the shared runtime, and that includes Claude Code when you start it there.
+
+### Switching a project's PHP version
+
+Edit the project's `.php-version`, then run `igor refresh`:
+
+```bash
+cd ~/Code/portal
+echo 8.5 > .php-version
+igor refresh                              # "PHP 8.4 -> 8.5 (from .php-version)"
+```
+
+`refresh` rewrites the site's FrankenPHP config and LaunchAgent and those of its `Procfile.dev` workers, then restarts the ones that run. `igor list` shows the new version.
+
+On the command line, the switch takes effect right away. Inside the project, direnv puts the new runtime on PATH (it may ask for `direnv allow` once). The `php` command from `~/.igor/bin` reads `.php-version` from the current folder upwards as well.
+
+Only installed versions work. If `.php-version` names one that isn't installed, `refresh` warns and keeps the site on its current version. `igor update --check` lists what's available. Commit `.php-version` if your team should use the same version.
 
 ## Workers (Reverb, queues, scheduler, ...)
 
