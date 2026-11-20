@@ -28,7 +28,13 @@ App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like
 
 ## Install and setup
 
-You need macOS with [Homebrew](https://brew.sh). igor itself is a single bash script with no other dependencies.
+You need macOS with [Homebrew](https://brew.sh). igor is a single native Go binary built with [Cobra](https://github.com/spf13/cobra) and [Charmbracelet Huh / Lipgloss](https://charm.sh) — zero runtime dependencies.
+
+```bash
+# Build from source (requires Go 1.24+)
+make build                                # produces ./igor
+ln -s ~/igor/igor ~/bin/igor              # or any folder on your PATH
+```
 
 ```bash
 # 1. get igor and put it on your PATH
@@ -257,4 +263,4 @@ Each binary must run straight from its folder. On macOS that means dylibs in `..
 - PHP sees every request as HTTPS (`HTTPS=on`), so Laravel, Symfony and WordPress generate `https://` URLs and assets behind the front proxy without trusting any proxy. That includes direct calls to `http://127.0.0.1:<port>`. The client IP is still `127.0.0.1`.
 - Logs are not rotated. `igor logs --clear <name>` empties one (`portal:queue` for a worker), `igor logs --clear` all of them. Running services keep logging into the emptied file.
 - The front proxy listens on all interfaces, so sites are reachable from your LAN unless the macOS firewall blocks them. Binding only to 127.0.0.1 on ports 80/443 needs root on macOS.
-- The script targets the bash 3.2 that ships with macOS and needs nothing else.
+- The Go rewrite is 100% backwards compatible with existing `~/.igor` registries, Caddyfiles, shims, logs, and LaunchAgent plists from `main`. Run `make test` to execute the unit test suite.
