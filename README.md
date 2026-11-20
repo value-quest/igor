@@ -100,7 +100,7 @@ The installer keeps the previous version as `~/frankenphp/php8.x.backup.<date>`,
 
 ### New and dropped PHP versions
 
-When the suite adds a minor version (e.g. 8.6), `igor update` installs it next to the others. Switch a project by changing its `.php-version` and running `igor refresh` (see [Switching a project's PHP version](#switching-a-projects-php-version)).
+When the suite adds a minor version (e.g. 8.6), `igor update` installs it next to the others. Switch a project by changing its `.php-version` (see [Switching a project's PHP version](#switching-a-projects-php-version)).
 
 When the suite drops a version, `igor update --check` lists it as "no longer in the release". Move its projects to another version, then remove it:
 
@@ -132,19 +132,21 @@ igor info sso                             # internal URL + .env hints
 
 ### Switching a project's PHP version
 
-Edit the project's `.php-version`, then run `igor refresh`:
+Change the project's `.php-version`. igor picks it up by itself:
 
 ```bash
 cd ~/Code/portal
-echo 8.5 > .php-version
-igor refresh                              # "PHP 8.4 -> 8.5 (from .php-version)"
+echo 8.5 > .php-version                   # or: git checkout a branch with another .php-version
+                                          # a moment later: "portal now runs PHP 8.5 (was 8.4)"
 ```
 
-`refresh` rewrites the site's FrankenPHP config and LaunchAgent and those of its `Procfile.dev` workers, then restarts the ones that run. `igor list` shows the new version.
+Each site has a watcher that runs `igor refresh <site>` whenever the project's `.php-version` or `Procfile.dev` changes. That covers editing the file, `git checkout`, `git pull` and rebases, so branches can pin different versions (e.g. `dev` on 8.5, `prod` on 8.4). For that, every branch must commit its own `.php-version`, and none may list it in `.gitignore`. If a branch has no `.php-version`, the site stays on its current version and the notification says so. The refresh rewrites the site's FrankenPHP config and LaunchAgent and those of its workers, restarts the ones that run, and shows a macOS notification. `igor logs <site>:watch` shows what the watcher did. `igor refresh <site>` does the same by hand.
 
 On the command line, the switch takes effect right away. Inside the project, direnv puts the new runtime on PATH (it may ask for `direnv allow` once). The `php` command from `~/.igor/bin` reads `.php-version` from the current folder upwards as well.
 
-Only installed versions work. If `.php-version` names one that isn't installed, `refresh` warns and keeps the site on its current version. `igor update --check` lists what's available. Commit `.php-version` if your team should use the same version.
+Only installed versions work. If `.php-version` names one that isn't installed, the site stays on its current version and the notification says so; `igor install` gets the missing one if the suite ships it. Composer dependencies aren't touched: if the branches need different ones, run `composer install` yourself. Commit `.php-version` if your team should use the same version.
+
+Sites added before the watcher existed get one with the next `igor refresh`.
 
 ## Workers (Reverb, queues, scheduler, ...)
 
@@ -156,7 +158,7 @@ queue:    php artisan queue:listen --tries=3
 schedule: php artisan schedule:work
 ```
 
-`igor add` starts them along with the site. After you edit the file, run `igor workers` in the project (or `igor workers <name>` from anywhere). That starts new lines, restarts changed ones, and removes deleted ones.
+`igor add` starts them along with the site. When the file changes, by editing it or by switching branches, the site's watcher applies it: new lines start, changed ones restart, deleted ones stop. `igor workers` does the same by hand.
 
 Each worker is a LaunchAgent, like the site itself. It starts at login and restarts when it exits, at most once every 10 seconds. Commands run in the project folder through bash, with the site's PHP first on PATH, followed by `vendor/bin` and `node_modules/.bin`.
 
@@ -242,7 +244,7 @@ Each binary must run straight from its folder. On macOS that means dylibs in `..
 | `~/.igor/php/99-igor.ini` | shared php.ini settings (web and CLI, via `PHP_INI_SCAN_DIR`) |
 | `~/.igor/data/<service>/` | working folder and data of each service |
 | `~/.igor/logs/` | one log per site and per worker (`<site>@<worker>.log`), plus `proxy.log` |
-| `~/Library/LaunchAgents/dev.igor.*.plist` | LaunchAgents for the proxy, sites and workers (`<site>@<worker>`): start at login, restart if they crash |
+| `~/Library/LaunchAgents/dev.igor.*.plist` | LaunchAgents for the proxy, sites and workers (`<site>@<worker>`): start at login, restart if they crash. Plus one watcher per site (`<site>~watch`) that runs on changes to `.php-version` or `Procfile.dev` |
 
 ## Notes
 

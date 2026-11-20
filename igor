@@ -14,6 +14,7 @@
 set -euo pipefail
 
 IGOR_HOME="${IGOR_HOME:-$HOME/.igor}"
+IGOR_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"   # for watchers
 PHP_ROOT="${IGOR_PHP_ROOT:-$HOME/frankenphp}"
 TLD="${IGOR_TLD:-test}"
 FIRST_PORT=8101
@@ -27,7 +28,15 @@ SHIM_DIR="$IGOR_HOME/bin"
 LOGS="$IGOR_HOME/logs"
 INI_DIR="$IGOR_HOME/php"
 
-die()  { echo "igor: $*" >&2; exit 1; }
+# notify <message>: macOS notification, only when run by a site's watcher
+# (IGOR_WATCH=1), where nobody sees the terminal
+notify() {
+    [ -n "${IGOR_WATCH:-}" ] || return 0
+    local msg=${1//\\/\\\\}
+    msg=${msg//\"/\\\"}
+    osascript -e "display notification \"$msg\" with title \"igor\"" >/dev/null 2>&1 || true
+}
+die()  { echo "igor: $*" >&2; notify "$*"; exit 1; }
 info() { echo "==> $*"; }
 
 usage() {
@@ -67,7 +76,8 @@ Usage: igor <command> [args]
                             install the latest suite release, then restart
                             everything on the new binaries
   uninstall <8.x> [--yes]   remove a PHP runtime the suite no longer ships
-  refresh [--restart]       regenerate all configs (PHP from each .php-version,
+  refresh [<name>] [--restart]
+                            regenerate all configs (PHP from each .php-version,
                             Procfile.dev workers, routes, newest PHP for the
                             proxy) and restart what changed; --restart
                             restarts everything running (after a PHP update)
@@ -166,6 +176,9 @@ xml_escape() {
 }
 
 # write_plist <name> <workdir> <PATH> <args...>
+# PLIST_ENV="K=V<newline>..." adds environment variables; PLIST_WATCH="<path>
+# <newline>..." makes it a watcher: run once whenever one of the paths changes
+# instead of keeping a process alive.
 # Leaves an identical plist untouched (macOS shows a "Background Activity"
 # banner whenever one changes) and sets PLIST_CHANGED to 1 or 0.
 PLIST_CHANGED=0
@@ -203,9 +216,22 @@ EOF
         done <<< "${PLIST_ENV:-}"
         cat <<EOF
   </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Interactive</string>
+EOF
+        if [ -n "${PLIST_WATCH:-}" ]; then
+            echo "  <key>WatchPaths</key>"
+            echo "  <array>"
+            while IFS= read -r kv; do
+                [ -n "$kv" ] || continue
+                echo "    <string>$(xml_escape "$kv")</string>"
+            done <<< "$PLIST_WATCH"
+            echo "  </array>"
+            echo "  <key>ProcessType</key><string>Background</string>"
+        else
+            echo "  <key>RunAtLoad</key><true/>"
+            echo "  <key>KeepAlive</key><true/>"
+            echo "  <key>ProcessType</key><string>Interactive</string>"
+        fi
+        cat <<EOF
   <key>StandardOutPath</key><string>$(xml_escape "$LOGS/$name.log")</string>
   <key>StandardErrorPath</key><string>$(xml_escape "$LOGS/$name.log")</string>
 </dict>
@@ -512,6 +538,7 @@ EOF
         echo "Workers from Procfile.dev:"
         sync_workers "$name"
     fi
+    write_watcher "$name"
 
     cat <<EOF
 https://$name.$TLD  ->  http://127.0.0.1:$port  (PHP $php, serving $docroot/)
@@ -621,14 +648,81 @@ bounce() {
     echo "  restarted ${agent/@/:}"
 }
 
+# A site's watcher ("<site>~watch", shown as <site>:watch) runs
+# 'igor refresh <site>' whenever the project's .php-version or Procfile.dev
+# changes, e.g. on 'git checkout' of a branch with another PHP version.
+watcher() { echo "$1~watch"; }
+
+write_watcher() {   # write_watcher <site>
+    local site=$1 dir w existed=0 running=0
+    dir=$(registry_field "$site" 5)
+    w=$(watcher "$site")
+    [ -f "$(plist "$w")" ] && existed=1
+    is_running "$w" && running=1
+    PLIST_WATCH="$dir/.php-version"$'\n'"$dir/Procfile.dev" PLIST_ENV="IGOR_WATCH=1" \
+        write_plist "$w" "$dir" "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin" "$IGOR_BIN" refresh "$site"
+    if [ "$existed" = 0 ]; then
+        agent_start "$w"
+    elif [ "$PLIST_CHANGED" = 1 ] && [ "$running" = 1 ]; then
+        agent_stop "$w"; agent_start "$w"
+    fi
+}
+
+# refresh_site <name> <force>: PHP from .php-version, configs, route, workers
+refresh_site() {
+    local name=$1 force=$2 port php dir want w
+    port=$(registry_field "$name" 2)
+    php=$(registry_field "$name" 4)
+    dir=$(registry_field "$name" 5)
+    info "$name"
+    if [ ! -d "$dir" ]; then
+        echo "  $dir is gone - skipped (igor rm $name)" >&2; return 0
+    fi
+    want=""
+    [ -f "$dir/.php-version" ] && want=$(tr -d '[:space:]' < "$dir/.php-version")
+    if [ -z "$want" ]; then
+        # e.g. a branch that doesn't commit .php-version (or ignores it)
+        echo "  no .php-version in $dir - staying on PHP $php" >&2
+        notify "$name: no .php-version in this branch - still on PHP $php. Commit one to pin the version."
+    elif [ "$want" != "$php" ]; then
+        if [ -x "$(php_bin "$want")/frankenphp" ]; then
+            registry_set "$name" 4 "$want"
+            echo "  PHP $php -> $want (from .php-version)"
+            notify "$name now runs PHP $want (was $php)"
+        else
+            echo "  .php-version wants PHP $want, which is not installed - staying on $php" >&2
+            notify "$name: .php-version wants PHP $want, which is not installed - still on PHP $php. Run 'igor install'."
+        fi
+    fi
+    write_site "$name"
+    write_route "$name" "$port"
+    bounce "$name" "$SITE_CHANGED" "$force"
+    sync_workers "$name" keep-stopped
+    if [ "$force" = 1 ]; then
+        for w in $(site_workers "$name"); do bounce "$w" 0 1; done
+    fi
+    # the watcher doesn't rewrite (and so restart) itself
+    [ -n "${IGOR_WATCH:-}" ] || write_watcher "$name"
+}
+
 cmd_refresh() {
-    local force=0 name port type php dir want w
-    case "${1:-}" in
-        --restart) force=1 ;;
-        "") ;;
-        *) die "usage: igor refresh [--restart]" ;;
-    esac
+    local force=0 only="" name port type php dir
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --restart) force=1; shift ;;
+            -*) die "usage: igor refresh [<name>] [--restart]" ;;
+            *)  [ -z "$only" ] || die "usage: igor refresh [<name>] [--restart]"; only=$1; shift ;;
+        esac
+    done
     [ -f "$CADDYFILE" ] || die "run 'igor setup' first"
+
+    if [ -n "$only" ]; then
+        require_php_site "$only"
+        [ -z "${IGOR_WATCH:-}" ] || echo "--- $(date '+%Y-%m-%d %H:%M:%S') .php-version or Procfile.dev changed"
+        refresh_site "$only" "$force"
+        reload_proxy
+        return 0
+    fi
 
     cmd_shims >/dev/null
     info "Shims updated"
@@ -638,34 +732,14 @@ cmd_refresh() {
         "$(proxy_bin)" run --config "$CADDYFILE" --adapter caddyfile
     bounce proxy "$PLIST_CHANGED" "$force"
 
-    # read the registry up front: the loop rewrites it
+    # read the registry up front: refresh_site rewrites it
     local entries
     entries=$(cat "$REGISTRY")
     while IFS=$'\t' read -r name port type php dir _ <&3; do
         [ -n "$name" ] || continue
         case "$type" in
             php)
-                info "$name"
-                if [ ! -d "$dir" ]; then
-                    echo "  $dir is gone - skipped (igor rm $name)" >&2; continue
-                fi
-                want=""
-                [ -f "$dir/.php-version" ] && want=$(tr -d '[:space:]' < "$dir/.php-version")
-                if [ -n "$want" ] && [ "$want" != "$php" ]; then
-                    if [ -x "$(php_bin "$want")/frankenphp" ]; then
-                        registry_set "$name" 4 "$want"
-                        echo "  PHP $php -> $want (from .php-version)"
-                    else
-                        echo "  .php-version wants PHP $want, which is not installed - staying on $php" >&2
-                    fi
-                fi
-                write_site "$name"
-                write_route "$name" "$port"
-                bounce "$name" "$SITE_CHANGED" "$force"
-                sync_workers "$name" keep-stopped
-                if [ "$force" = 1 ]; then
-                    for w in $(site_workers "$name"); do bounce "$w" 0 1; done
-                fi
+                refresh_site "$name" "$force"
                 ;;
             service)
                 info "$name (service)"
@@ -867,7 +941,12 @@ Change .php-version in those projects to another version, run 'igor refresh', th
 # --- workers (Procfile.dev) --------------------------------------------------
 # A worker is a launchd agent named "<site>@<worker>"; users write <site>:<worker>.
 
-agent_name() { echo "${1/:/@}"; }
+agent_name() {   # <site>:<worker> -> <site>@<worker>, <site>:watch -> <site>~watch
+    case "$1" in
+        *:watch) echo "${1%:watch}~watch" ;;
+        *)       echo "${1/:/@}" ;;
+    esac
+}
 
 site_workers() {   # worker agent names of a site, e.g. "portal@queue"
     local f
@@ -907,6 +986,7 @@ sync_workers() {
             [[ "$line" =~ ^([A-Za-z0-9_-]+):[[:space:]]*(.+)$ ]] ||
                 die "Procfile.dev: can't read '$line' (expected 'name: command')"
             wname=${BASH_REMATCH[1]}; cmd=${BASH_REMATCH[2]}
+            [ "$wname" != watch ] || die "Procfile.dev: 'watch' is reserved for igor's watcher - rename that worker"
             agent="$site@$wname"
             keep="$keep $agent "
             existed=0; [ -f "$(plist "$agent")" ] && existed=1
@@ -956,6 +1036,7 @@ cmd_rm() {
     local w type
     type=$(registry_field "$name" 3)
     for w in $(site_workers "$name"); do remove_agent "$w"; done
+    remove_agent "$(watcher "$name")"
     agent_stop "$name"
     rm -f "$(plist "$name")" "$SITES_DIR/$name.caddy" "$BACKENDS_DIR/$name.Caddyfile"
     awk -F'\t' -v n="$name" '$1 != n' "$REGISTRY" > "$REGISTRY.tmp" && mv "$REGISTRY.tmp" "$REGISTRY"
@@ -979,7 +1060,8 @@ targets() {
         *:*) [ -f "$(plist "$(agent_name "$name")")" ] || die "no worker '$name'"
              agent_name "$name" ;;
         *)   if [ "$(registry_field "$name" 3)" = service ]; then echo "$name"
-             else require_php_site "$name"; echo "$name"; site_workers "$name"; fi ;;
+             else require_php_site "$name"; echo "$name"; site_workers "$name"
+                  [ -f "$(plist "$(watcher "$name")")" ] && watcher "$name"; fi ;;
     esac
 }
 
