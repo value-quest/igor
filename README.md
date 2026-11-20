@@ -121,7 +121,10 @@ igor service add redis -- redis-server    # background service, see below
 igor list
 igor stop portal / start portal / logs portal
 igor stop / igor start                    # everything, e.g. to switch to Herd and back
-igor workers                              # sync Procfile.dev workers
+git checkout dev                          # .php-version / Procfile.dev changed: the watcher switches the site
+igor logs portal:watch                    # what the watcher did
+igor workers                              # sync Procfile.dev workers by hand
+igor refresh portal                       # same as the watcher, by hand
 igor refresh                              # regenerate everything, restart what changed
 igor info sso                             # internal URL + .env hints
 ```
@@ -129,6 +132,8 @@ igor info sso                             # internal URL + .env hints
 `add` serves `public/` if the project has one (Laravel, Symfony, Slim, ...) and the project folder itself otherwise. For anything else, pass `--docroot` with a folder inside the project, e.g. `--docroot web`. Requests for files that don't exist go to the document root's `index.php`, which is what front controllers and WordPress permalinks need. To change the document root, run `igor rm <name>` and add the site again.
 
 `add` writes `.php-version` and an `.envrc`. Inside the project, `php`, `composer` and `frankenphp` then come from the shared runtime, and that includes Claude Code when you start it there.
+
+`add` also starts a watcher for the site. When the project's `.php-version` or `Procfile.dev` changes, by editing it or by switching branches, the watcher moves the site and its workers to the new settings and shows a macOS notification. You don't need to run anything after a `git checkout`. See [Switching a project's PHP version](#switching-a-projects-php-version).
 
 ### Switching a project's PHP version
 
