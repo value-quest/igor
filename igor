@@ -278,7 +278,8 @@ cmd_shims() {
 #!/bin/bash
 # igor shim - php, composer, frankenphp from the shared FrankenPHP runtimes.
 #   php84, composer85, frankenphp84 ...  fixed version
-#   php, composer, frankenphp            nearest .php-version from $PWD upwards,
+#   php, composer, frankenphp            nearest .php-version from $PWD upwards
+#                                        (or composer.json config.platform.php),
 #                                        else the newest installed runtime
 set -eu
 PHP_ROOT="${IGOR_PHP_ROOT:-$HOME/frankenphp}"
@@ -296,6 +297,12 @@ else
             from="$d/.php-version"
             v=$(tr -d '[:space:]' < "$from" | sed -E 's/^php//; s/^([0-9]+\.[0-9]+).*/\1/')
             break
+        fi
+        if [ -f "$d/composer.json" ]; then
+            # no .php-version: composer.json's config.platform.php, if set
+            v=$(plutil -extract config.platform.php raw -o - "$d/composer.json" 2>/dev/null |
+                sed -nE 's/^([0-9]+\.[0-9]+)(\.[0-9]+)?$/\1/p' || true)
+            if [ -n "$v" ]; then from="$d/composer.json"; break; fi
         fi
         [ "$d" = / ] && break
         d=$(dirname "$d")
@@ -478,6 +485,16 @@ Then, in a project:  igor add <name>
 EOF
 }
 
+# composer_platform_php <dir>: "8.4" from composer.json's config.platform.php
+# ("8.4", "8.4.12", ...), or nothing if it's not set
+composer_platform_php() {
+    local v
+    [ -f "$1/composer.json" ] || return 0
+    v=$(plutil -extract config.platform.php raw -o - "$1/composer.json" 2>/dev/null || true)
+    [[ "$v" =~ ^([0-9]+\.[0-9]+)(\.[0-9]+)?$ ]] && echo "${BASH_REMATCH[1]}"
+    return 0
+}
+
 cmd_add() {
     local name="" php="" port="" docroot="" dir
     dir=$(pwd)
@@ -508,12 +525,20 @@ cmd_add() {
     existing=$(awk -F'\t' -v d="$dir" '$5 == d { print $1 }' "$REGISTRY" 2>/dev/null || true)
     [ -z "$existing" ] || die "this folder is already served as '$existing'"
 
-    # PHP version: --php, else .php-version, else newest installed
+    # PHP version: --php, else .php-version, else composer.json's
+    # config.platform.php, else the newest installed
+    local from="--php"
     if [ -z "$php" ] && [ -f "$dir/.php-version" ]; then
-        php=$(tr -d '[:space:]' < "$dir/.php-version")
+        php=$(tr -d '[:space:]' < "$dir/.php-version"); from=".php-version"
     fi
-    [ -n "$php" ] || php=$(newest_php)
-    [ -x "$(php_bin "$php")/frankenphp" ] || die "PHP $php is not installed in $PHP_ROOT/php$php"
+    if [ -z "$php" ]; then
+        php=$(composer_platform_php "$dir"); from="composer.json (config.platform.php)"
+    fi
+    if [ -z "$php" ]; then
+        php=$(newest_php); from="newest installed"
+    fi
+    [ -x "$(php_bin "$php")/frankenphp" ] ||
+        die "PHP $php (from $from) is not installed in $PHP_ROOT/php$php - run 'igor install', or pick one with --php 8.x"
     echo "$php" > "$dir/.php-version"
 
     [ -n "$port" ] || port=$(next_port)
@@ -541,7 +566,7 @@ EOF
     write_watcher "$name"
 
     cat <<EOF
-https://$name.$TLD  ->  http://127.0.0.1:$port  (PHP $php, serving $docroot/)
+https://$name.$TLD  ->  http://127.0.0.1:$port  (PHP $php from $from, serving $docroot/)
 Pinned in .php-version - add .php-version and .envrc to git if the team should share it.
 EOF
 }
@@ -649,8 +674,9 @@ bounce() {
 }
 
 # A site's watcher ("<site>~watch", shown as <site>:watch) runs
-# 'igor refresh <site>' whenever the project's .php-version or Procfile.dev
-# changes, e.g. on 'git checkout' of a branch with another PHP version.
+# 'igor refresh <site>' whenever the project's .php-version, composer.json or
+# Procfile.dev changes, e.g. on 'git checkout' of a branch with another PHP
+# version.
 watcher() { echo "$1~watch"; }
 
 write_watcher() {   # write_watcher <site>
@@ -659,7 +685,7 @@ write_watcher() {   # write_watcher <site>
     w=$(watcher "$site")
     [ -f "$(plist "$w")" ] && existed=1
     is_running "$w" && running=1
-    PLIST_WATCH="$dir/.php-version"$'\n'"$dir/Procfile.dev" PLIST_ENV="IGOR_WATCH=1" \
+    PLIST_WATCH="$dir/.php-version"$'\n'"$dir/composer.json"$'\n'"$dir/Procfile.dev" PLIST_ENV="IGOR_WATCH=1" \
         write_plist "$w" "$dir" "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin" "$IGOR_BIN" refresh "$site"
     if [ "$existed" = 0 ]; then
         agent_start "$w"
@@ -678,20 +704,25 @@ refresh_site() {
     if [ ! -d "$dir" ]; then
         echo "  $dir is gone - skipped (igor rm $name)" >&2; return 0
     fi
+    # wanted version: .php-version, else composer.json's config.platform.php
+    # (e.g. a branch that doesn't commit .php-version); not written back
+    local from=".php-version"
     want=""
     [ -f "$dir/.php-version" ] && want=$(tr -d '[:space:]' < "$dir/.php-version")
     if [ -z "$want" ]; then
-        # e.g. a branch that doesn't commit .php-version (or ignores it)
-        echo "  no .php-version in $dir - staying on PHP $php" >&2
-        notify "$name: no .php-version in this branch - still on PHP $php. Commit one to pin the version."
+        want=$(composer_platform_php "$dir"); from="composer.json"
+    fi
+    if [ -z "$want" ]; then
+        echo "  no .php-version and no config.platform.php in composer.json - staying on PHP $php" >&2
+        notify "$name: no .php-version and no config.platform.php in this branch - still on PHP $php."
     elif [ "$want" != "$php" ]; then
         if [ -x "$(php_bin "$want")/frankenphp" ]; then
             registry_set "$name" 4 "$want"
-            echo "  PHP $php -> $want (from .php-version)"
+            echo "  PHP $php -> $want (from $from)"
             notify "$name now runs PHP $want (was $php)"
         else
-            echo "  .php-version wants PHP $want, which is not installed - staying on $php" >&2
-            notify "$name: .php-version wants PHP $want, which is not installed - still on PHP $php. Run 'igor install'."
+            echo "  $from wants PHP $want, which is not installed - staying on $php" >&2
+            notify "$name: $from wants PHP $want, which is not installed - still on PHP $php. Run 'igor install'."
         fi
     fi
     write_site "$name"
@@ -718,7 +749,7 @@ cmd_refresh() {
 
     if [ -n "$only" ]; then
         require_php_site "$only"
-        [ -z "${IGOR_WATCH:-}" ] || echo "--- $(date '+%Y-%m-%d %H:%M:%S') .php-version or Procfile.dev changed"
+        [ -z "${IGOR_WATCH:-}" ] || echo "--- $(date '+%Y-%m-%d %H:%M:%S') .php-version, composer.json or Procfile.dev changed"
         refresh_site "$only" "$force"
         reload_proxy
         return 0

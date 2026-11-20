@@ -113,7 +113,7 @@ igor uninstall 8.4      # asks first; --yes skips the question
 ## Daily use
 
 ```bash
-cd ~/Code/portal && igor add portal       # https://portal.test, newest PHP
+cd ~/Code/portal && igor add portal       # https://portal.test, PHP picked as below
 cd ~/Code/sso    && igor add sso --php 8.4
 cd ~/Code/blog   && igor add blog --docroot .   # WordPress: serve the project folder itself
 igor proxy reverb 8080                    # route to a service you run yourself
@@ -131,9 +131,9 @@ igor info sso                             # internal URL + .env hints
 
 `add` serves `public/` if the project has one (Laravel, Symfony, Slim, ...) and the project folder itself otherwise. For anything else, pass `--docroot` with a folder inside the project, e.g. `--docroot web`. Requests for files that don't exist go to the document root's `index.php`, which is what front controllers and WordPress permalinks need. To change the document root, run `igor rm <name>` and add the site again.
 
-`add` writes `.php-version` and an `.envrc`. Inside the project, `php`, `composer` and `frankenphp` then come from the shared runtime, and that includes Claude Code when you start it there.
+`add` picks the PHP version from, in this order: `--php 8.x`, the project's `.php-version`, `config.platform.php` in `composer.json`, else the newest installed version. It prints where the version came from. It writes the result to `.php-version` and adds an `.envrc`. Inside the project, `php`, `composer` and `frankenphp` then come from the shared runtime, and that includes Claude Code when you start it there.
 
-`add` also starts a watcher for the site. When the project's `.php-version` or `Procfile.dev` changes, by editing it or by switching branches, the watcher moves the site and its workers to the new settings and shows a macOS notification. You don't need to run anything after a `git checkout`. See [Switching a project's PHP version](#switching-a-projects-php-version).
+`add` also starts a watcher for the site. When the project's `.php-version`, `composer.json` or `Procfile.dev` changes, by editing it or by switching branches, the watcher moves the site and its workers to the new settings and shows a macOS notification. You don't need to run anything after a `git checkout`. See [Switching a project's PHP version](#switching-a-projects-php-version).
 
 ### Switching a project's PHP version
 
@@ -145,9 +145,9 @@ echo 8.5 > .php-version                   # or: git checkout a branch with anoth
                                           # a moment later: "portal now runs PHP 8.5 (was 8.4)"
 ```
 
-Each site has a watcher that runs `igor refresh <site>` whenever the project's `.php-version` or `Procfile.dev` changes. That covers editing the file, `git checkout`, `git pull` and rebases, so branches can pin different versions (e.g. `dev` on 8.5, `prod` on 8.4). For that, every branch must commit its own `.php-version`, and none may list it in `.gitignore`. If a branch has no `.php-version`, the site stays on its current version and the notification says so. The refresh rewrites the site's FrankenPHP config and LaunchAgent and those of its workers, restarts the ones that run, and shows a macOS notification. `igor logs <site>:watch` shows what the watcher did. `igor refresh <site>` does the same by hand.
+Each site has a watcher that runs `igor refresh <site>` whenever the project's `.php-version`, `composer.json` or `Procfile.dev` changes. That covers editing the file, `git checkout`, `git pull` and rebases, so branches can pin different versions (e.g. `dev` on 8.5, `prod` on 8.4). Each branch should commit its own `.php-version`. A branch without one falls back to `config.platform.php` in its `composer.json`. If neither is there, the site stays on its current version and the notification says so. The fallback doesn't create a `.php-version`. The refresh rewrites the site's FrankenPHP config and LaunchAgent and those of its workers, restarts the ones that run, and shows a macOS notification. `igor logs <site>:watch` shows what the watcher did. `igor refresh <site>` does the same by hand.
 
-On the command line, the switch takes effect right away. Inside the project, direnv puts the new runtime on PATH (it may ask for `direnv allow` once). The `php` command from `~/.igor/bin` reads `.php-version` from the current folder upwards as well.
+On the command line, the switch takes effect right away. Inside the project, direnv puts the new runtime on PATH (it may ask for `direnv allow` once). The `php` command from `~/.igor/bin` reads `.php-version` (or `composer.json`'s `config.platform.php`) from the current folder upwards as well. direnv's `.envrc` only reads `.php-version`.
 
 Only installed versions work. If `.php-version` names one that isn't installed, the site stays on its current version and the notification says so; `igor install` gets the missing one if the suite ships it. Composer dependencies aren't touched: if the branches need different ones, run `composer install` yourself. Commit `.php-version` if your team should use the same version.
 
@@ -213,7 +213,7 @@ AWS_USE_PATH_STYLE_ENDPOINT=true
 
 | Command | PHP version |
 |---|---|
-| `php`, `composer`, `frankenphp` | nearest `.php-version` from the current folder upwards, else the newest installed |
+| `php`, `composer`, `frankenphp` | nearest `.php-version` (or `composer.json` with `config.platform.php`) from the current folder upwards, else the newest installed |
 | `php84`, `composer84`, `frankenphp84`, `php85`, ... | that version, always |
 
 They work in any folder: no direnv and no `igor add` needed. Put `~/.igor/bin` first on PATH, at the end of `~/.zshrc` so it comes after Herd's lines:
@@ -249,7 +249,7 @@ Each binary must run straight from its folder. On macOS that means dylibs in `..
 | `~/.igor/php/99-igor.ini` | shared php.ini settings (web and CLI, via `PHP_INI_SCAN_DIR`) |
 | `~/.igor/data/<service>/` | working folder and data of each service |
 | `~/.igor/logs/` | one log per site and per worker (`<site>@<worker>.log`), plus `proxy.log` |
-| `~/Library/LaunchAgents/dev.igor.*.plist` | LaunchAgents for the proxy, sites and workers (`<site>@<worker>`): start at login, restart if they crash. Plus one watcher per site (`<site>~watch`) that runs on changes to `.php-version` or `Procfile.dev` |
+| `~/Library/LaunchAgents/dev.igor.*.plist` | LaunchAgents for the proxy, sites and workers (`<site>@<worker>`): start at login, restart if they crash. Plus one watcher per site (`<site>~watch`) that runs on changes to `.php-version`, `composer.json` or `Procfile.dev` |
 
 ## Notes
 
