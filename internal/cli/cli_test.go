@@ -159,8 +159,8 @@ func TestAddListInfoRemoveSite(t *testing.T) {
 	if raw, _ := os.ReadFile(filepath.Join(proj, ".php-version")); string(raw) != "8.4\n" {
 		t.Fatalf("unexpected .php-version: %q", string(raw))
 	}
-	if _, err := os.Stat(env.cfg.PlistPath("portal.valuequest~watch")); err != nil {
-		t.Fatalf("expected watcher plist: %v", err)
+	if !env.app.Sup.Exists("portal.valuequest~watch") {
+		t.Fatalf("expected watcher unit at %s", env.app.Sup.UnitPath("portal.valuequest~watch"))
 	}
 
 	// Info
@@ -209,12 +209,22 @@ func TestServiceAddWithRouteAndEnv(t *testing.T) {
 		t.Fatalf("service add failed: %v\n%s", err, out)
 	}
 
-	plist, _ := os.ReadFile(env.cfg.PlistPath("mail"))
-	if !strings.Contains(string(plist), "<key>FOO</key><string>bar</string>") {
-		t.Fatalf("missing env in plist:\n%s", string(plist))
-	}
-	if !strings.Contains(string(plist), "<string>--listen</string>") {
-		t.Fatalf("missing args after -- in plist:\n%s", string(plist))
+	unit, _ := os.ReadFile(env.app.Sup.UnitPath("mail"))
+	unitStr := string(unit)
+	if goruntime.GOOS == "darwin" {
+		if !strings.Contains(unitStr, "<key>FOO</key><string>bar</string>") {
+			t.Fatalf("missing env in plist:\n%s", unitStr)
+		}
+		if !strings.Contains(unitStr, "<string>--listen</string>") {
+			t.Fatalf("missing args after -- in plist:\n%s", unitStr)
+		}
+	} else {
+		if !strings.Contains(unitStr, `Environment="FOO=bar"`) {
+			t.Fatalf("missing env in systemd unit:\n%s", unitStr)
+		}
+		if !strings.Contains(unitStr, "--listen 8025") {
+			t.Fatalf("missing args after -- in systemd unit:\n%s", unitStr)
+		}
 	}
 }
 
@@ -242,14 +252,15 @@ func TestRefreshSwitchesPHPAndSyncsWorkers(t *testing.T) {
 	if e == nil || e.PHP != "8.5" {
 		t.Fatalf("expected PHP 8.5, got %+v", e)
 	}
-	if _, err := os.Stat(env.cfg.PlistPath("app@queue")); err != nil {
-		t.Fatalf("expected worker plist app@queue: %v", err)
+	if !env.app.Sup.Exists("app@queue") {
+		t.Fatalf("expected worker unit app@queue at %s", env.app.Sup.UnitPath("app@queue"))
 	}
 }
 
 func TestUpdateCheckAndSelfUpdateWithHTTPServer(t *testing.T) {
 	env := newTestEnv(t)
 	arch := goruntime.GOARCH
+	goos := goruntime.GOOS
 
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -258,8 +269,8 @@ func TestUpdateCheckAndSelfUpdateWithHTTPServer(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"tag_name": "v1.14.0",
 				"assets": []map[string]string{
-					{"name": "frankenphp-darwin-" + arch + "-php84.tar.gz"},
-					{"name": "frankenphp-darwin-" + arch + "-php85.tar.gz"},
+					{"name": "frankenphp-" + goos + "-" + arch + "-php84.tar.gz"},
+					{"name": "frankenphp-" + goos + "-" + arch + "-php85.tar.gz"},
 					{"name": "versions.json", "browser_download_url": srv.URL + "/versions.json"},
 				},
 			})
@@ -273,7 +284,7 @@ func TestUpdateCheckAndSelfUpdateWithHTTPServer(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"tag_name": "v9.9.9",
 				"assets": []map[string]string{
-					{"name": "igor-darwin-" + arch, "browser_download_url": srv.URL + "/igor-bin"},
+					{"name": "igor-" + goos + "-" + arch, "browser_download_url": srv.URL + "/igor-bin"},
 				},
 			})
 		case "/igor-bin":
@@ -333,7 +344,11 @@ func TestDoctorAndUninstall(t *testing.T) {
 	}
 
 	out, _ := env.run("doctor")
-	if !strings.Contains(out, "Homebrew") || !strings.Contains(out, "PHP runtimes") {
+	wantCheck := "Homebrew"
+	if goruntime.GOOS != "darwin" {
+		wantCheck = "systemd --user"
+	}
+	if !strings.Contains(out, wantCheck) || !strings.Contains(out, "PHP runtimes") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
 
@@ -369,12 +384,12 @@ func TestStartDNSSafeguard(t *testing.T) {
 		return runner.Result{}
 	}
 
-	// Missing resolver + stopped dnsmasq should warn with fix hints
+	// Missing resolver (macOS) + stopped dnsmasq should warn with fix hints
 	out, err := env.run("start")
 	if err != nil {
 		t.Fatalf("start failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "is missing or wrong") {
+	if goruntime.GOOS == "darwin" && !strings.Contains(out, "is missing or wrong") {
 		t.Fatalf("expected missing resolver warning, got:\n%s", out)
 	}
 	if !strings.Contains(out, "dnsmasq is not running") {
