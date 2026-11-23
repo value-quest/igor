@@ -47,7 +47,7 @@ echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
 echo 'export PATH="$HOME/.igor/bin:$PATH"' >> ~/.zshrc   # last line, after Herd's
 
 # 5. serve your first project
-cd ~/Code/portal && igor add portal       # https://portal.test
+cd ~/app && igor add app       # https://app.test
 ```
 
 <details><summary>Building from source</summary>
@@ -126,18 +126,18 @@ igor uninstall 8.4      # asks first; --yes skips the question
 ## Daily use
 
 ```bash
-cd ~/Code/portal && igor add portal       # https://portal.test, PHP picked as below
-cd ~/Code/sso    && igor add sso --php 8.4
+cd ~/app && igor add app                  # https://app.test, PHP picked as below
+cd ~/Code/sso    && igor add app-old --php 8.4
 cd ~/Code/blog   && igor add blog --docroot .   # WordPress: serve the project folder itself
 igor proxy reverb 8080                    # route to a service you run yourself
 igor service add redis -- redis-server    # background service, see below
 igor list
-igor stop portal / start portal / logs portal
+igor stop app / start app / logs app
 igor stop / igor start                    # everything, e.g. to switch to Herd and back
 git checkout dev                          # .php-version / Procfile.dev changed: the watcher switches the site
-igor logs portal:watch                    # what the watcher did
+igor logs app:watch                       # what the watcher did
 igor workers                              # sync Procfile.dev workers by hand
-igor refresh portal                       # same as the watcher, by hand
+igor refresh app                          # same as the watcher, by hand
 igor refresh                              # regenerate everything, restart what changed
 igor info sso                             # internal URL + .env hints
 igor doctor                               # check dnsmasq, resolver, proxy, Herd, runtimes & sites
@@ -154,9 +154,9 @@ igor doctor                               # check dnsmasq, resolver, proxy, Herd
 Change the project's `.php-version`. igor picks it up by itself:
 
 ```bash
-cd ~/Code/portal
+cd ~/app
 echo 8.5 > .php-version                   # or: git checkout a branch with another .php-version
-                                          # a moment later: "portal now runs PHP 8.5 (was 8.4)"
+                                          # a moment later: "app now runs PHP 8.5 (was 8.4)"
 ```
 
 Each site has a watcher that runs `igor refresh <site>` whenever the project's `.php-version`, `composer.json` or `Procfile.dev` changes. That covers editing the file, `git checkout`, `git pull` and rebases, so branches can pin different versions (e.g. `dev` on 8.5, `prod` on 8.4). Each branch should commit its own `.php-version`. A branch without one falls back to `config.platform.php` in its `composer.json`. If neither is there, the site stays on its current version and the notification says so. The fallback doesn't create a `.php-version`. The refresh rewrites the site's FrankenPHP config and LaunchAgent and those of its workers, restarts the ones that run, and shows a macOS notification. `igor logs <site>:watch` shows what the watcher did. `igor refresh <site>` does the same by hand.
@@ -182,11 +182,11 @@ schedule: php artisan schedule:work
 Each worker is a LaunchAgent, like the site itself. It starts at login and restarts when it exits, at most once every 10 seconds. Commands run in the project folder through bash, with the site's PHP first on PATH, followed by `vendor/bin` and `node_modules/.bin`.
 
 ```bash
-igor list                       # workers appear under their site
-igor logs portal:reverb         # ~/.igor/logs/portal@reverb.log
-igor restart portal:queue       # one worker
-igor restart portal             # the site and all its workers
-igor stop portal                # same for stop/start
+igor list                    # workers appear under their site
+igor logs app:reverb         # ~/.igor/logs/app@reverb.log
+igor restart app:queue       # one worker
+igor restart app             # the site and all its workers
+igor stop app                # same for stop/start
 ```
 
 Locally, prefer `queue:listen` over `queue:work`: it picks up code changes without a restart. Only list commands that keep running. A command that exits is started again every 10 seconds.
@@ -285,6 +285,6 @@ GoReleaser builds macOS `arm64`/`amd64` binaries (`igor-darwin-arm64`, `igor-dar
 
 - Everything igor runs starts at login. `igor stop <name>` stops a site, worker or service and keeps it stopped after a restart of the Mac, until `igor start <name>`. An idle FrankenPHP server uses a few tens of MB.
 - PHP sees every request as HTTPS (`HTTPS=on`), so Laravel, Symfony and WordPress generate `https://` URLs and assets behind the front proxy without trusting any proxy. That includes direct calls to `http://127.0.0.1:<port>`. The client IP is still `127.0.0.1`.
-- Logs are not rotated. `igor logs --clear <name>` empties one (`portal:queue` for a worker), `igor logs --clear` all of them. Running services keep logging into the emptied file.
+- Logs are not rotated. `igor logs --clear <name>` empties one (`app:queue` for a worker), `igor logs --clear` all of them. Running services keep logging into the emptied file.
 - The front proxy listens on all interfaces, so sites are reachable from your LAN unless the macOS firewall blocks them. Binding only to 127.0.0.1 on ports 80/443 needs root on macOS.
 - The Go rewrite is 100% backwards compatible with existing `~/.igor` registries, Caddyfiles, shims, logs, and LaunchAgent plists from `main`. Run `make test` to execute the unit test suite.
