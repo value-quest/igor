@@ -10,6 +10,8 @@ dist:
 	mkdir -p dist
 	GOOS=darwin GOARCH=arm64 go build -mod=readonly -ldflags "$(LDFLAGS)" -o dist/igor-darwin-arm64 ./cmd/igor
 	GOOS=darwin GOARCH=amd64 go build -mod=readonly -ldflags "$(LDFLAGS)" -o dist/igor-darwin-amd64 ./cmd/igor
+	GOOS=linux GOARCH=arm64 go build -mod=readonly -ldflags "$(LDFLAGS)" -o dist/igor-linux-arm64 ./cmd/igor
+	GOOS=linux GOARCH=amd64 go build -mod=readonly -ldflags "$(LDFLAGS)" -o dist/igor-linux-amd64 ./cmd/igor
 
 test:
 	go test -mod=readonly -v ./...

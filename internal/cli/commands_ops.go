@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"strings"
-	"sync"
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -210,77 +210,13 @@ func (a *App) cmdUninstall() *cobra.Command {
 func (a *App) cmdDoctor() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Check dnsmasq, resolver, proxy, Herd conflicts, PHP runtimes, shims, and registered sites",
+		Short: "Check DNS, supervisor, proxy, PHP runtimes, shims, and registered sites",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a.UI.Intro("igor doctor")
 
-			var (
-				brewPath       string
-				direnvPath     string
-				brewPrefix     string
-				hasDnsmasq     bool
-				dnsmasqRunning bool
-				proxyUp        bool
-				herdRunning    bool
-				wg             sync.WaitGroup
-			)
-
-			wg.Add(7)
-			go func() { defer wg.Done(); brewPath, _ = a.Run.LookPath("brew") }()
-			go func() { defer wg.Done(); direnvPath, _ = a.Run.LookPath("direnv") }()
-			go func() { defer wg.Done(); brewPrefix = strings.TrimSpace(a.Run.Run("brew", "--prefix").Stdout) }()
-			go func() { defer wg.Done(); hasDnsmasq = a.Run.Run("brew", "list", "dnsmasq").OK() }()
-			go func() { defer wg.Done(); dnsmasqRunning = a.Run.Run("pgrep", "-x", "dnsmasq").OK() }()
-			go func() { defer wg.Done(); proxyUp = a.Launchd.IsRunning("proxy") }()
-			go func() { defer wg.Done(); herdRunning = a.Run.Run("pgrep", "-qf", "Herd").OK() }()
-			wg.Wait()
-
-			var rows [][]string
-			failures, warnings := 0, 0
-
-			if brewPath != "" {
-				rows = append(rows, []string{"Homebrew", "OK", brewPath})
-			} else {
-				rows = append(rows, []string{"Homebrew", "FAIL", "Not found (install from https://brew.sh)"})
-				failures++
-			}
-
-			if direnvPath != "" {
-				rows = append(rows, []string{"direnv", "OK", direnvPath})
-			} else {
-				rows = append(rows, []string{"direnv", "WARN", "Not found (run 'igor setup' or 'brew install direnv')"})
-				warnings++
-			}
-
-			dnsmasqConf := ""
-			hasRule := false
-			if brewPrefix != "" {
-				dnsmasqConf = filepath.Join(brewPrefix, "etc", "dnsmasq.conf")
-				if raw, err := os.ReadFile(dnsmasqConf); err == nil {
-					hasRule = strings.Contains(string(raw), fmt.Sprintf("address=/.%s/127.0.0.1", a.Cfg.TLD))
-				}
-			}
-			switch {
-			case hasDnsmasq && hasRule && dnsmasqRunning:
-				rows = append(rows, []string{"dnsmasq", "OK", fmt.Sprintf("*.%s -> 127.0.0.1 (%s)", a.Cfg.TLD, dnsmasqConf)})
-			case hasDnsmasq && hasRule:
-				rows = append(rows, []string{"dnsmasq", "FAIL", "Configured, but not running (run 'sudo brew services restart dnsmasq' or 'igor setup')"})
-				failures++
-			case hasDnsmasq:
-				rows = append(rows, []string{"dnsmasq", "WARN", fmt.Sprintf("Installed, but *.%s rule missing (run 'igor setup')", a.Cfg.TLD)})
-				warnings++
-			default:
-				rows = append(rows, []string{"dnsmasq", "FAIL", "Not installed (run 'igor setup')"})
-				failures++
-			}
-
-			resolverFile := a.Cfg.ResolverPath()
-			if raw, err := os.ReadFile(resolverFile); err == nil && strings.TrimSpace(string(raw)) == "nameserver 127.0.0.1" {
-				rows = append(rows, []string{fmt.Sprintf("Resolver (%s)", resolverFile), "OK", "nameserver 127.0.0.1"})
-			} else {
-				rows = append(rows, []string{fmt.Sprintf("Resolver (%s)", resolverFile), "FAIL", "Missing or wrong (run 'igor setup')"})
-				failures++
-			}
+			proxyBin, _ := a.Caddy.ProxyBin()
+			rows, failures, warnings := a.Platform.DoctorEnvChecks(proxyBin)
+			proxyUp := a.Sup.IsRunning("proxy")
 
 			versions := a.Runtimes.InstalledVersions()
 			if len(versions) > 0 {
@@ -314,13 +250,6 @@ func (a *App) cmdDoctor() *cobra.Command {
 			default:
 				rows = append(rows, []string{"Front proxy", "FAIL", "Not configured (run 'igor setup')"})
 				failures++
-			}
-
-			if herdRunning {
-				rows = append(rows, []string{"Herd conflict", "WARN", "Herd appears to be running and may hold ports 80/443"})
-				warnings++
-			} else {
-				rows = append(rows, []string{"Herd conflict", "OK", "No Herd process detected"})
 			}
 
 			var missingDirs, missingPHPs []string
@@ -396,7 +325,11 @@ func (a *App) cmdSelfUpdate() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			assetName := "igor-darwin-" + arch
+			targetOS := a.Updater.OS
+			if targetOS == "" {
+				targetOS = goruntime.GOOS
+			}
+			assetName := fmt.Sprintf("igor-%s-%s", targetOS, arch)
 			dlURL := ""
 			for _, asset := range rel.Assets {
 				if asset.Name == assetName {

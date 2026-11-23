@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	goruntime "runtime"
 	"strings"
 )
 
@@ -106,5 +107,11 @@ func (e *ExecRunner) LookPath(file string, extraPaths ...string) (string, error)
 }
 
 func (e *ExecRunner) PortInUse(port string) bool {
+	if goruntime.GOOS == "linux" {
+		if _, err := e.LookPath("ss"); err == nil {
+			res := e.Run("ss", "-H", "-tln", "sport", "=", ":"+port)
+			return res.OK() && strings.TrimSpace(res.Stdout) != ""
+		}
+	}
 	return e.Run("lsof", "-nP", "-iTCP:"+port, "-sTCP:LISTEN").OK()
 }

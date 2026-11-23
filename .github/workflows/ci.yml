@@ -2,12 +2,15 @@ name: CI
 
 on:
   push:
-    branches: [main, go-rewrite]
+    branches: [main, linux-wsl-support]
   pull_request:
 
 jobs:
   test:
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:

@@ -25,16 +25,16 @@ func (a *App) cmdStart() *cobra.Command {
 					return err
 				}
 				a.UI.Info(args[0] + " started")
-				a.checkDNS()
+				a.Platform.CheckDNS()
 				return nil
 			}
 
-			if !a.Launchd.IsRunning("proxy") && (a.Run.PortInUse("80") || a.Run.PortInUse("443")) {
-				return fmt.Errorf("ports 80/443 are in use - quit Herd (or whatever holds them) first")
+			if !a.Sup.IsRunning("proxy") && (a.Run.PortInUse("80") || a.Run.PortInUse("443")) {
+				return fmt.Errorf("%s", a.Platform.PortInUseMsg())
 			}
 
 			a.UI.Info("Front proxy")
-			if err := a.Launchd.Start("proxy"); err != nil {
+			if err := a.Sup.Start("proxy"); err != nil {
 				return err
 			}
 			names, err := a.Registry.RunnableNames()
@@ -47,52 +47,10 @@ func (a *App) cmdStart() *cobra.Command {
 				}
 				a.UI.Note(n + " started")
 			}
-			a.checkDNS()
+			a.Platform.CheckDNS()
 			a.UI.Outro(fmt.Sprintf("igor is running: https://<name>.%s", a.Cfg.TLD))
 			return nil
 		},
-	}
-}
-
-func (a *App) checkDNS() {
-	resolverFile := a.Cfg.ResolverPath()
-	raw, err := os.ReadFile(resolverFile)
-	if err != nil || strings.TrimSpace(string(raw)) != "nameserver 127.0.0.1" {
-		a.UI.Warn(fmt.Sprintf("Resolver %s is missing or wrong (often removed by Herd) - *.%s domains won't resolve", resolverFile, a.Cfg.TLD))
-		if a.UI.Interactive {
-			ok, confirmErr := a.UI.Confirm(fmt.Sprintf("Recreate %s now (needs sudo)?", resolverFile), true)
-			if confirmErr == nil && ok {
-				mkRes := a.Run.RunWith(runner.Opts{Interactive: true}, "sudo", "mkdir", "-p", filepath.Dir(resolverFile))
-				teeRes := a.Run.RunWith(runner.Opts{Stdin: strings.NewReader("nameserver 127.0.0.1\n")}, "sudo", "tee", resolverFile)
-				if mkRes.OK() && teeRes.OK() {
-					a.UI.Info("Recreated " + resolverFile)
-				} else {
-					a.UI.Warn(fmt.Sprintf("Could not recreate %s - run 'igor setup'", resolverFile))
-				}
-			} else {
-				a.UI.Note(fmt.Sprintf("Fix with 'igor setup' or: echo \"nameserver 127.0.0.1\" | sudo tee %s", resolverFile))
-			}
-		} else {
-			a.UI.Note(fmt.Sprintf("Fix with 'igor setup' or: echo \"nameserver 127.0.0.1\" | sudo tee %s", resolverFile))
-		}
-	}
-
-	if !a.Run.Run("pgrep", "-x", "dnsmasq").OK() {
-		a.UI.Warn(fmt.Sprintf("dnsmasq is not running - *.%s domains won't resolve", a.Cfg.TLD))
-		if a.UI.Interactive {
-			ok, confirmErr := a.UI.Confirm("Start dnsmasq now (needs sudo)?", true)
-			if confirmErr == nil && ok {
-				if a.Run.RunWith(runner.Opts{Interactive: true}, "sudo", "brew", "services", "restart", "dnsmasq").OK() {
-					a.UI.Info("Started dnsmasq")
-				} else {
-					a.UI.Warn("Failed to start dnsmasq - run 'sudo brew services restart dnsmasq' or 'igor setup'")
-				}
-			} else {
-				a.UI.Note("Fix with 'sudo brew services restart dnsmasq' or 'igor setup'")
-			}
-		} else {
-			a.UI.Note("Fix with 'sudo brew services restart dnsmasq' or 'igor setup'")
-		}
 	}
 }
 
@@ -120,10 +78,10 @@ func (a *App) cmdStop() *cobra.Command {
 				a.UI.Note(n + " stopped")
 			}
 			a.UI.Info("Front proxy")
-			if err := a.Launchd.Disable("proxy"); err != nil {
+			if err := a.Sup.Disable("proxy"); err != nil {
 				return err
 			}
-			a.UI.Outro("igor is stopped and stays stopped after a restart. Ports 80/443 are free, so you can start Herd now. Back to igor: quit Herd, then 'igor start'.")
+			a.UI.Outro(a.Platform.StopOutro())
 			return nil
 		},
 	}
@@ -214,7 +172,7 @@ func (a *App) runList() error {
 		wg.Add(1)
 		go func(agent string) {
 			defer wg.Done()
-			running := a.Launchd.IsRunning(agent)
+			running := a.Sup.IsRunning(agent)
 			mu.Lock()
 			agentState[agent] = running
 			mu.Unlock()
@@ -393,11 +351,7 @@ func (a *App) cmdInfo() *cobra.Command {
 			}
 
 			if entry.Type == "service" {
-				res := a.Run.Run("plutil", "-extract", "ProgramArguments", "json", "-o", "-", a.Cfg.PlistPath(name))
-				cmdStr := "(unknown)"
-				if res.OK() {
-					cmdStr = strings.TrimSpace(res.Stdout)
-				}
+				cmdStr := a.Sup.CommandString(name)
 				lines := []string{
 					"Command:   " + cmdStr,
 					"Data:      " + entry.Dir,
@@ -517,11 +471,14 @@ func (a *App) runRefresh(only string, force bool) error {
 		return err
 	}
 	a.UI.Info(fmt.Sprintf("Front proxy (PHP %s)", newest))
+	if proxyBin, err := a.Caddy.ProxyBin(); err == nil {
+		_ = a.Platform.EnsureProxyCapabilities(proxyBin)
+	}
 	proxyChanged, err := a.Caddy.WriteProxyPlist()
 	if err != nil {
 		return err
 	}
-	if bounced, err := a.Launchd.Bounce("proxy", proxyChanged, force); err != nil {
+	if bounced, err := a.Sup.Bounce("proxy", proxyChanged, force); err != nil {
 		return err
 	} else if bounced {
 		a.UI.Note("  restarted proxy")
@@ -544,7 +501,7 @@ func (a *App) runRefresh(only string, force bool) error {
 			} else {
 				a.Caddy.RemoveRoute(e.Name)
 			}
-			if bounced, err := a.Launchd.Bounce(e.Name, false, force); err != nil {
+			if bounced, err := a.Sup.Bounce(e.Name, false, force); err != nil {
 				return err
 			} else if bounced {
 				a.UI.Note("  restarted " + e.Name)
@@ -554,6 +511,7 @@ func (a *App) runRefresh(only string, force bool) error {
 		}
 	}
 
+	_ = a.Platform.SyncHosts()
 	if err := a.ReloadProxyOrWarn(); err != nil {
 		return err
 	}

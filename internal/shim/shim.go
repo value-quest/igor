@@ -3,6 +3,7 @@ package shim
 import (
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strings"
 
@@ -69,13 +70,29 @@ export PHP_INI_SCAN_DIR="${PHP_INI_SCAN_DIR:-${IGOR_HOME:-$HOME/.igor}/php}"
 exec "$bin/$tool" "$@"
 `
 
+const linuxComposerExtract = `            if command -v jq >/dev/null 2>&1; then
+                v=$(jq -r '.config.platform.php // empty' "$d/composer.json" 2>/dev/null |
+                    sed -nE 's/^([0-9]+\.[0-9]+)(\.[0-9]+)?$/\1/p' || true)
+            elif command -v python3 >/dev/null 2>&1; then
+                v=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("config",{}).get("platform",{}).get("php",""))' "$d/composer.json" 2>/dev/null |
+                    sed -nE 's/^([0-9]+\.[0-9]+)(\.[0-9]+)?$/\1/p' || true)
+            fi`
+
+const darwinComposerExtract = `            v=$(plutil -extract config.platform.php raw -o - "$d/composer.json" 2>/dev/null |
+                sed -nE 's/^([0-9]+\.[0-9]+)(\.[0-9]+)?$/\1/p' || true)`
+
 func (m *Manager) CreateShims() ([]string, error) {
 	if err := m.cfg.EnsureDir(m.cfg.ShimDir); err != nil {
 		return nil, err
 	}
 
+	script := shimScript
+	if goruntime.GOOS != "darwin" {
+		script = strings.Replace(script, darwinComposerExtract, linuxComposerExtract, 1)
+	}
+
 	shimPath := filepath.Join(m.cfg.ShimDir, "igor-shim")
-	if err := os.WriteFile(shimPath, []byte(shimScript), 0o755); err != nil {
+	if err := os.WriteFile(shimPath, []byte(script), 0o755); err != nil {
 		return nil, err
 	}
 

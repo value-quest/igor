@@ -9,11 +9,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/value-quest/igor/internal/caddy"
 	"github.com/value-quest/igor/internal/config"
-	"github.com/value-quest/igor/internal/launchd"
+	"github.com/value-quest/igor/internal/platform"
 	"github.com/value-quest/igor/internal/registry"
 	"github.com/value-quest/igor/internal/runner"
 	"github.com/value-quest/igor/internal/runtime"
 	"github.com/value-quest/igor/internal/shim"
+	"github.com/value-quest/igor/internal/supervisor"
 	"github.com/value-quest/igor/internal/ui"
 	"github.com/value-quest/igor/internal/updater"
 	"github.com/value-quest/igor/internal/worker"
@@ -27,7 +28,8 @@ type App struct {
 	UI       *ui.UI
 	Registry *registry.Store
 	Runtimes *runtime.Manager
-	Launchd  *launchd.Manager
+	Sup      supervisor.Manager
+	Platform *platform.Platform
 	Caddy    *caddy.Manager
 	Workers  *worker.Manager
 	Shims    *shim.Manager
@@ -44,9 +46,10 @@ func NewApp(cfg *config.Config, run runner.Runner, out, errOut io.Writer) *App {
 	u := ui.New(out, errOut, cfg.IsWatch)
 	reg := registry.New(cfg)
 	rt := runtime.New(cfg, run)
-	ld := launchd.New(cfg, run)
-	cd := caddy.New(cfg, run, rt, ld)
-	wk := worker.New(cfg, ld)
+	sup := supervisor.New(cfg, run)
+	plat := platform.New(platform.Detect(), cfg, run, u, reg)
+	cd := caddy.New(cfg, run, rt, sup)
+	wk := worker.New(cfg, sup)
 	sh := shim.New(cfg, rt)
 	up := updater.New(cfg, run, rt)
 
@@ -56,7 +59,8 @@ func NewApp(cfg *config.Config, run runner.Runner, out, errOut io.Writer) *App {
 		UI:       u,
 		Registry: reg,
 		Runtimes: rt,
-		Launchd:  ld,
+		Sup:      sup,
+		Platform: plat,
 		Caddy:    cd,
 		Workers:  wk,
 		Shims:    sh,
@@ -65,12 +69,7 @@ func NewApp(cfg *config.Config, run runner.Runner, out, errOut io.Writer) *App {
 }
 
 func (a *App) Notify(msg string) {
-	if !a.Cfg.IsWatch {
-		return
-	}
-	escaped := strings.ReplaceAll(msg, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-	a.Run.Run("osascript", "-e", fmt.Sprintf(`display notification "%s" with title "igor"`, escaped))
+	a.Platform.Notify(msg)
 }
 
 func (a *App) ReloadProxyOrWarn() error {
@@ -87,7 +86,7 @@ func (a *App) ReloadProxyOrWarn() error {
 func (a *App) Targets(name string) ([]string, error) {
 	if strings.Contains(name, ":") {
 		agent := a.Cfg.AgentName(name)
-		if _, err := os.Stat(a.Cfg.PlistPath(agent)); err != nil {
+		if !a.Sup.Exists(agent) {
 			return nil, fmt.Errorf("no worker '%s'", name)
 		}
 		return []string{agent}, nil
@@ -106,7 +105,7 @@ func (a *App) Targets(name string) ([]string, error) {
 	}
 	list := append([]string{name}, a.Workers.SiteWorkers(name)...)
 	w := a.Cfg.WatcherName(name)
-	if _, err := os.Stat(a.Cfg.PlistPath(w)); err == nil {
+	if a.Sup.Exists(w) {
 		list = append(list, w)
 	}
 	return list, nil
@@ -125,7 +124,7 @@ func (a *App) Control(action, name string) error {
 			return err
 		}
 		if changed {
-			if err := a.Launchd.Stop(name); err != nil {
+			if err := a.Sup.Stop(name); err != nil {
 				return err
 			}
 		}
@@ -134,18 +133,18 @@ func (a *App) Control(action, name string) error {
 	for _, agent := range list {
 		switch action {
 		case "stop":
-			if err := a.Launchd.Disable(agent); err != nil {
+			if err := a.Sup.Disable(agent); err != nil {
 				return err
 			}
 		case "start":
-			if err := a.Launchd.Start(agent); err != nil {
+			if err := a.Sup.Start(agent); err != nil {
 				return err
 			}
 		case "restart":
-			if err := a.Launchd.Stop(agent); err != nil {
+			if err := a.Sup.Stop(agent); err != nil {
 				return err
 			}
-			if err := a.Launchd.Start(agent); err != nil {
+			if err := a.Sup.Start(agent); err != nil {
 				return err
 			}
 		}
@@ -197,7 +196,7 @@ func (a *App) RefreshSite(name string, force bool) error {
 	if err := a.Caddy.WriteRoute(name, entry.Port); err != nil {
 		return err
 	}
-	if bounced, err := a.Launchd.Bounce(name, siteChanged, force); err != nil {
+	if bounced, err := a.Sup.Bounce(name, siteChanged, force); err != nil {
 		return err
 	} else if bounced {
 		a.UI.Note("  restarted " + name)
@@ -213,7 +212,7 @@ func (a *App) RefreshSite(name string, force bool) error {
 
 	if force {
 		for _, w := range a.Workers.SiteWorkers(name) {
-			if bounced, err := a.Launchd.Bounce(w, false, true); err != nil {
+			if bounced, err := a.Sup.Bounce(w, false, true); err != nil {
 				return err
 			} else if bounced {
 				a.UI.Note("  restarted " + a.Cfg.DisplayAgentName(w))

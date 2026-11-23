@@ -6,21 +6,21 @@ import (
 	"path/filepath"
 
 	"github.com/value-quest/igor/internal/config"
-	"github.com/value-quest/igor/internal/launchd"
 	"github.com/value-quest/igor/internal/registry"
 	"github.com/value-quest/igor/internal/runner"
 	"github.com/value-quest/igor/internal/runtime"
+	"github.com/value-quest/igor/internal/supervisor"
 )
 
 type Manager struct {
 	cfg      *config.Config
 	run      runner.Runner
 	runtimes *runtime.Manager
-	launchd  *launchd.Manager
+	sup      supervisor.Manager
 }
 
-func New(cfg *config.Config, run runner.Runner, runtimes *runtime.Manager, ld *launchd.Manager) *Manager {
-	return &Manager{cfg: cfg, run: run, runtimes: runtimes, launchd: ld}
+func New(cfg *config.Config, run runner.Runner, runtimes *runtime.Manager, sup supervisor.Manager) *Manager {
+	return &Manager{cfg: cfg, run: run, runtimes: runtimes, sup: sup}
 }
 
 func (m *Manager) ProxyBin() (string, error) {
@@ -84,7 +84,7 @@ func (m *Manager) WriteProxyPlist() (bool, error) {
 		return false, err
 	}
 	bin := m.cfg.PHPBin(newest)
-	return m.launchd.WritePlist(
+	return m.sup.WriteUnit(
 		"proxy",
 		m.cfg.IgorHome,
 		bin+":/usr/bin:/bin:/usr/sbin:/sbin",
@@ -132,7 +132,7 @@ func (m *Manager) WriteSite(entry registry.Entry) (bool, error) {
 		return false, err
 	}
 	bin := m.cfg.PHPBin(entry.PHP)
-	plistChanged, err := m.launchd.WritePlist(
+	plistChanged, err := m.sup.WriteUnit(
 		entry.Name,
 		entry.Dir,
 		bin+":/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -159,7 +159,7 @@ func (m *Manager) RemoveRoute(name string) {
 }
 
 func (m *Manager) ReloadProxy() (bool, error) {
-	if !m.launchd.IsRunning("proxy") {
+	if !m.sup.IsRunning("proxy") {
 		return false, nil
 	}
 	bin, err := m.ProxyBin()

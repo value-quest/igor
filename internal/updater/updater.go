@@ -50,6 +50,7 @@ type Updater struct {
 	HTTPClient *http.Client
 	APIBase    string
 	GitHubBase string
+	OS         string
 }
 
 func New(cfg *config.Config, run runner.Runner, runtimes *runtime.Manager) *Updater {
@@ -60,6 +61,7 @@ func New(cfg *config.Config, run runner.Runner, runtimes *runtime.Manager) *Upda
 		HTTPClient: &http.Client{Timeout: 5 * time.Minute},
 		APIBase:    "https://api.github.com",
 		GitHubBase: "https://github.com",
+		OS:         goruntime.GOOS,
 	}
 }
 
@@ -111,7 +113,11 @@ func (u *Updater) FetchLatestSuite() (*SuiteRelease, error) {
 		return nil, fmt.Errorf("unexpected release tag '%s'", gh.TagName)
 	}
 
-	assetRe := regexp.MustCompile(`^frankenphp-darwin-` + regexp.QuoteMeta(arch) + `-(php\d+)\.tar\.gz$`)
+	targetOS := u.OS
+	if targetOS == "" {
+		targetOS = goruntime.GOOS
+	}
+	assetRe := regexp.MustCompile(`^frankenphp-` + regexp.QuoteMeta(targetOS) + `-` + regexp.QuoteMeta(arch) + `-(php\d+)\.tar\.gz$`)
 	rel := &SuiteRelease{
 		Tag:       gh.TagName,
 		Arch:      arch,
@@ -138,7 +144,7 @@ func (u *Updater) FetchLatestSuite() (*SuiteRelease, error) {
 	}
 
 	if len(rel.Shorts) == 0 {
-		return nil, fmt.Errorf("release %s has no darwin-%s builds", gh.TagName, arch)
+		return nil, fmt.Errorf("release %s has no %s-%s builds", gh.TagName, targetOS, arch)
 	}
 
 	if versionsURL != "" {

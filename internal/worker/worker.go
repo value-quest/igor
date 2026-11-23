@@ -6,37 +6,24 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/value-quest/igor/internal/config"
-	"github.com/value-quest/igor/internal/launchd"
 	"github.com/value-quest/igor/internal/registry"
+	"github.com/value-quest/igor/internal/supervisor"
 )
 
 type Manager struct {
-	cfg     *config.Config
-	launchd *launchd.Manager
+	cfg *config.Config
+	sup supervisor.Manager
 }
 
-func New(cfg *config.Config, ld *launchd.Manager) *Manager {
-	return &Manager{cfg: cfg, launchd: ld}
+func New(cfg *config.Config, sup supervisor.Manager) *Manager {
+	return &Manager{cfg: cfg, sup: sup}
 }
 
 func (m *Manager) SiteWorkers(site string) []string {
-	pattern := filepath.Join(m.cfg.AgentsDir, m.cfg.Label(site)+"@*.plist")
-	files, _ := filepath.Glob(pattern)
-	sort.Strings(files)
-
-	prefix := config.LabelPrefix + "."
-	var out []string
-	for _, f := range files {
-		base := strings.TrimSuffix(filepath.Base(f), ".plist")
-		if strings.HasPrefix(base, prefix) {
-			out = append(out, strings.TrimPrefix(base, prefix))
-		}
-	}
-	return out
+	return m.sup.SiteWorkers(site)
 }
 
 func (m *Manager) WriteWorkerRunner() (string, error) {
@@ -113,9 +100,8 @@ func (m *Manager) SyncWorkers(entry registry.Entry, keepStopped bool) ([]string,
 			agent := entry.Name + "@" + w.Name
 			keep[agent] = true
 
-			_, statErr := os.Stat(m.cfg.PlistPath(agent))
-			existed := statErr == nil
-			running := m.launchd.IsRunning(agent)
+			existed := m.sup.Exists(agent)
+			running := m.sup.IsRunning(agent)
 
 			path := strings.Join([]string{
 				m.cfg.PHPBin(entry.PHP),
@@ -129,18 +115,18 @@ func (m *Manager) SyncWorkers(entry registry.Entry, keepStopped bool) ([]string,
 				"/sbin",
 			}, ":")
 
-			changed, err := m.launchd.WritePlist(agent, entry.Dir, path, []string{runnerPath, w.Cmd}, nil, nil)
+			changed, err := m.sup.WriteUnit(agent, entry.Dir, path, []string{runnerPath, w.Cmd}, nil, nil)
 			if err != nil {
 				return nil, err
 			}
 			if changed {
-				if err := m.launchd.Stop(agent); err != nil {
+				if err := m.sup.Stop(agent); err != nil {
 					return nil, err
 				}
 				changes = append(changes, fmt.Sprintf("%s:%s  %s", entry.Name, w.Name, w.Cmd))
 			}
 			if !keepStopped || !existed || running {
-				if err := m.launchd.Start(agent); err != nil {
+				if err := m.sup.Start(agent); err != nil {
 					return nil, err
 				}
 			}
@@ -149,7 +135,7 @@ func (m *Manager) SyncWorkers(entry registry.Entry, keepStopped bool) ([]string,
 
 	for _, agent := range m.SiteWorkers(entry.Name) {
 		if !keep[agent] {
-			if err := m.launchd.Remove(agent); err != nil {
+			if err := m.sup.Remove(agent); err != nil {
 				return nil, err
 			}
 			short := agent[strings.Index(agent, "@")+1:]
@@ -162,16 +148,15 @@ func (m *Manager) SyncWorkers(entry registry.Entry, keepStopped bool) ([]string,
 
 func (m *Manager) WriteWatcher(entry registry.Entry) error {
 	w := m.cfg.WatcherName(entry.Name)
-	_, statErr := os.Stat(m.cfg.PlistPath(w))
-	existed := statErr == nil
-	running := m.launchd.IsRunning(w)
+	existed := m.sup.Exists(w)
+	running := m.sup.IsRunning(w)
 
-	changed, err := m.launchd.WritePlist(
+	changed, err := m.sup.WriteUnit(
 		w,
 		entry.Dir,
 		"/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
 		[]string{m.cfg.IgorBin, "refresh", entry.Name},
-		[]launchd.EnvVar{{Key: "IGOR_WATCH", Value: "1"}},
+		[]supervisor.EnvVar{{Key: "IGOR_WATCH", Value: "1"}},
 		[]string{
 			filepath.Join(entry.Dir, ".php-version"),
 			filepath.Join(entry.Dir, "composer.json"),
@@ -182,13 +167,13 @@ func (m *Manager) WriteWatcher(entry registry.Entry) error {
 		return err
 	}
 	if !existed {
-		return m.launchd.Start(w)
+		return m.sup.Start(w)
 	}
 	if changed && running {
-		if err := m.launchd.Stop(w); err != nil {
+		if err := m.sup.Stop(w); err != nil {
 			return err
 		}
-		return m.launchd.Start(w)
+		return m.sup.Start(w)
 	}
 	return nil
 }

@@ -21,9 +21,11 @@ type Config struct {
 	TLD          string
 	SuiteRepo    string
 	IgorRepo     string
-	AgentsDir    string
-	ResolverDir  string
-	RegistryFile string
+	AgentsDir        string
+	SystemdDir       string
+	ResolverDir      string
+	WindowsHostsPath string
+	RegistryFile     string
 	Caddyfile    string
 	SitesDir     string
 	BackendsDir  string
@@ -71,9 +73,11 @@ func New(home, igorHome, igorBin, phpRoot, tld, suiteRepo, igorRepo, agentsDir s
 		TLD:          tld,
 		SuiteRepo:    suiteRepo,
 		IgorRepo:     igorRepo,
-		AgentsDir:    agentsDir,
-		ResolverDir:  "/etc/resolver",
-		RegistryFile: filepath.Join(igorHome, "sites.tsv"),
+		AgentsDir:        agentsDir,
+		SystemdDir:       filepath.Join(home, ".config", "systemd", "user"),
+		ResolverDir:      "/etc/resolver",
+		WindowsHostsPath: "/mnt/c/Windows/System32/drivers/etc/hosts",
+		RegistryFile:     filepath.Join(igorHome, "sites.tsv"),
 		Caddyfile:    filepath.Join(igorHome, "Caddyfile"),
 		SitesDir:     filepath.Join(igorHome, "sites"),
 		BackendsDir:  filepath.Join(igorHome, "backends"),

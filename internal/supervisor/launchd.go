@@ -1,8 +1,10 @@
-package launchd
+package supervisor
 
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -10,18 +12,13 @@ import (
 	"github.com/value-quest/igor/internal/runner"
 )
 
-type EnvVar struct {
-	Key   string
-	Value string
-}
-
-type Manager struct {
+type LaunchdManager struct {
 	cfg *config.Config
 	run runner.Runner
 }
 
-func New(cfg *config.Config, run runner.Runner) *Manager {
-	return &Manager{cfg: cfg, run: run}
+func NewLaunchd(cfg *config.Config, run runner.Runner) *LaunchdManager {
+	return &LaunchdManager{cfg: cfg, run: run}
 }
 
 func xmlEscape(s string) string {
@@ -31,9 +28,9 @@ func xmlEscape(s string) string {
 	return s
 }
 
-// WritePlist writes a LaunchAgent plist byte-for-byte compatible with the bash version,
+// WriteUnit writes a LaunchAgent plist byte-for-byte compatible with the bash version,
 // leaving an identical file untouched to avoid macOS "Background Activity" banners.
-func (m *Manager) WritePlist(name, workdir, path string, args []string, extraEnv []EnvVar, watchPaths []string) (bool, error) {
+func (m *LaunchdManager) WriteUnit(name, workdir, path string, args []string, extraEnv []EnvVar, watchPaths []string) (bool, error) {
 	if err := m.cfg.EnsureDir(m.cfg.AgentsDir); err != nil {
 		return false, err
 	}
@@ -100,11 +97,44 @@ func (m *Manager) WritePlist(name, workdir, path string, args []string, extraEnv
 	return true, nil
 }
 
-func (m *Manager) IsRunning(agent string) bool {
+func (m *LaunchdManager) UnitPath(agent string) string {
+	return m.cfg.PlistPath(agent)
+}
+
+func (m *LaunchdManager) Exists(agent string) bool {
+	_, err := os.Stat(m.UnitPath(agent))
+	return err == nil
+}
+
+func (m *LaunchdManager) SiteWorkers(site string) []string {
+	pattern := filepath.Join(m.cfg.AgentsDir, m.cfg.Label(site)+"@*.plist")
+	files, _ := filepath.Glob(pattern)
+	sort.Strings(files)
+
+	prefix := config.LabelPrefix + "."
+	var out []string
+	for _, f := range files {
+		base := strings.TrimSuffix(filepath.Base(f), ".plist")
+		if strings.HasPrefix(base, prefix) {
+			out = append(out, strings.TrimPrefix(base, prefix))
+		}
+	}
+	return out
+}
+
+func (m *LaunchdManager) CommandString(agent string) string {
+	res := m.run.Run("plutil", "-extract", "ProgramArguments", "json", "-o", "-", m.cfg.PlistPath(agent))
+	if res.OK() {
+		return strings.TrimSpace(res.Stdout)
+	}
+	return "(unknown)"
+}
+
+func (m *LaunchdManager) IsRunning(agent string) bool {
 	return m.run.Run("launchctl", "print", m.cfg.Domain()+"/"+m.cfg.Label(agent)).OK()
 }
 
-func (m *Manager) IsAlive(agent string) bool {
+func (m *LaunchdManager) IsAlive(agent string) bool {
 	res := m.run.Run("launchctl", "print", m.cfg.Domain()+"/"+m.cfg.Label(agent))
 	if !res.OK() {
 		return false
@@ -117,7 +147,7 @@ func (m *Manager) IsAlive(agent string) bool {
 	return false
 }
 
-func (m *Manager) Start(agent string) error {
+func (m *LaunchdManager) Start(agent string) error {
 	target := m.cfg.Domain() + "/" + m.cfg.Label(agent)
 	m.run.Run("launchctl", "enable", target)
 	if m.IsRunning(agent) {
@@ -134,7 +164,7 @@ func (m *Manager) Start(agent string) error {
 	return nil
 }
 
-func (m *Manager) Stop(agent string) error {
+func (m *LaunchdManager) Stop(agent string) error {
 	if !m.IsRunning(agent) {
 		return nil
 	}
@@ -149,7 +179,7 @@ func (m *Manager) Stop(agent string) error {
 	return fmt.Errorf("%s did not stop within 30s (launchctl print %s)", agent, target)
 }
 
-func (m *Manager) Disable(agent string) error {
+func (m *LaunchdManager) Disable(agent string) error {
 	if err := m.Stop(agent); err != nil {
 		return err
 	}
@@ -157,7 +187,7 @@ func (m *Manager) Disable(agent string) error {
 	return nil
 }
 
-func (m *Manager) Remove(agent string) error {
+func (m *LaunchdManager) Remove(agent string) error {
 	if err := m.Stop(agent); err != nil {
 		return err
 	}
@@ -165,7 +195,7 @@ func (m *Manager) Remove(agent string) error {
 	return nil
 }
 
-func (m *Manager) Bounce(agent string, changed, force bool) (bool, error) {
+func (m *LaunchdManager) Bounce(agent string, changed, force bool) (bool, error) {
 	if !m.IsRunning(agent) {
 		return false, nil
 	}
@@ -181,38 +211,6 @@ func (m *Manager) Bounce(agent string, changed, force bool) (bool, error) {
 	return true, nil
 }
 
-func (m *Manager) CheckAlive(name string, logOffset int64, wait time.Duration) error {
-	if wait > 0 {
-		time.Sleep(wait)
-	}
-	if m.IsAlive(name) {
-		return nil
-	}
-
-	logFile := m.cfg.LogPath(name)
-	excerpt := "  |   (empty)"
-	if raw, err := os.ReadFile(logFile); err == nil {
-		src := string(raw)
-		if logOffset > 0 && int64(len(raw)) > logOffset {
-			delta := string(raw[logOffset:])
-			if strings.TrimSpace(delta) != "" {
-				src = delta
-			}
-		}
-		lines := strings.Split(strings.TrimRight(src, "\r\n"), "\n")
-		if len(lines) > 15 {
-			lines = lines[len(lines)-15:]
-		}
-		if strings.TrimSpace(src) != "" {
-			for i, l := range lines {
-				lines[i] = "  | " + l
-			}
-			excerpt = strings.Join(lines, "\n")
-		}
-	}
-
-	return fmt.Errorf(
-		"%s is not running - it exited right after starting. Its log:\n%s\nlaunchd keeps retrying every 10s. Fix the command and run 'igor service add %s ...' again,\nor remove it with 'igor rm %s'.",
-		name, excerpt, name, name,
-	)
+func (m *LaunchdManager) CheckAlive(name string, logOffset int64, wait time.Duration) error {
+	return checkAliveWith(m.cfg, "launchd", m.IsAlive, name, logOffset, wait)
 }

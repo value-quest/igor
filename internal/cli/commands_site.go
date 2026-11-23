@@ -11,68 +11,20 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 	"github.com/value-quest/igor/internal/config"
-	"github.com/value-quest/igor/internal/launchd"
 	"github.com/value-quest/igor/internal/registry"
 	"github.com/value-quest/igor/internal/runner"
+	"github.com/value-quest/igor/internal/supervisor"
 )
 
 func (a *App) cmdSetup() *cobra.Command {
 	return &cobra.Command{
 		Use:   "setup",
-		Short: "One-time setup: dnsmasq for *.test, front proxy, local CA, and PHP CLI shims",
+		Short: "One-time setup: DNS for *.test, front proxy, local CA, and PHP CLI shims",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a.UI.Intro("igor setup")
 
-			if _, err := a.Run.LookPath("brew"); err != nil {
-				return fmt.Errorf("Homebrew is required")
-			}
-
-			if _, err := a.Run.LookPath("direnv"); err != nil {
-				if err := a.UI.Spin("Installing direnv via Homebrew...", func() error {
-					if res := a.Run.Run("brew", "install", "direnv"); !res.OK() {
-						return fmt.Errorf("brew install direnv failed: %s", res.Stderr)
-					}
-					return nil
-				}); err != nil {
-					return err
-				}
-			}
-
-			if !a.Run.Run("brew", "list", "dnsmasq").OK() {
-				if err := a.UI.Spin("Installing dnsmasq via Homebrew...", func() error {
-					if res := a.Run.Run("brew", "install", "dnsmasq"); !res.OK() {
-						return fmt.Errorf("brew install dnsmasq failed: %s", res.Stderr)
-					}
-					return nil
-				}); err != nil {
-					return err
-				}
-			}
-
-			prefix := strings.TrimSpace(a.Run.Run("brew", "--prefix").Stdout)
-			conf := filepath.Join(prefix, "etc", "dnsmasq.conf")
-			existing, _ := os.ReadFile(conf)
-			if !strings.Contains(string(existing), "# igor") {
-				a.UI.Info(fmt.Sprintf("Pointing *.%s to 127.0.0.1 in %s", a.Cfg.TLD, conf))
-				f, err := os.OpenFile(conf, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-				if err != nil {
-					return err
-				}
-				_, _ = fmt.Fprintf(f, "\n# igor\naddress=/.%s/127.0.0.1\nlisten-address=127.0.0.1\n", a.Cfg.TLD)
-				f.Close()
-			}
-
-			a.UI.Info("Starting dnsmasq (needs sudo for port 53)")
-			if res := a.Run.RunWith(runner.Opts{Interactive: a.UI.Interactive}, "sudo", "brew", "services", "restart", "dnsmasq"); !res.OK() {
-				return fmt.Errorf("failed to restart dnsmasq")
-			}
-
-			resolverFile := a.Cfg.ResolverPath()
-			curRes, _ := os.ReadFile(resolverFile)
-			if strings.TrimSpace(string(curRes)) != "nameserver 127.0.0.1" {
-				a.UI.Info(fmt.Sprintf("Creating %s (sudo)", resolverFile))
-				a.Run.RunWith(runner.Opts{Interactive: a.UI.Interactive}, "sudo", "mkdir", "-p", filepath.Dir(resolverFile))
-				a.Run.RunWith(runner.Opts{Stdin: strings.NewReader("nameserver 127.0.0.1\n")}, "sudo", "tee", resolverFile)
+			if err := a.Platform.SetupEnvironment(); err != nil {
+				return err
 			}
 
 			for _, d := range []string{a.Cfg.IgorHome, a.Cfg.SitesDir, a.Cfg.LogsDir, a.Cfg.IniDir} {
@@ -90,18 +42,22 @@ func (a *App) cmdSetup() *cobra.Command {
 				return err
 			}
 
-			if a.Run.Run("pgrep", "-qf", "Herd").OK() {
-				a.UI.Warn("Herd seems to be running - quit it, it holds ports 80/443.")
+			proxyBin, err := a.Caddy.ProxyBin()
+			if err != nil {
+				return err
+			}
+			if err := a.Platform.EnsureProxyCapabilities(proxyBin); err != nil {
+				return err
 			}
 
 			if err := a.UI.Spin("Starting front proxy...", func() error {
 				if _, err := a.Caddy.WriteProxyPlist(); err != nil {
 					return err
 				}
-				if err := a.Launchd.Stop("proxy"); err != nil {
+				if err := a.Sup.Stop("proxy"); err != nil {
 					return err
 				}
-				if err := a.Launchd.Start("proxy"); err != nil {
+				if err := a.Sup.Start("proxy"); err != nil {
 					return err
 				}
 				if a.UI.Interactive {
@@ -120,21 +76,14 @@ func (a *App) cmdSetup() *cobra.Command {
 			a.UI.Info(fmt.Sprintf("Shims in %s: %s", a.Cfg.ShimDir, strings.Join(shims, " ")))
 			if !a.Shims.IsOnPath() {
 				a.UI.Callout("Add shims to PATH", []string{
-					"Put them first on PATH, at the end of ~/.zshrc (after Herd's lines):",
+					"Put them first on PATH in your shell profile (e.g. ~/.zshrc or ~/.bashrc):",
 					`  export PATH="$HOME/.igor/bin:$PATH"`,
 				}, false)
 			}
 
-			a.UI.Info("Trusting the local CA (macOS asks for your password)")
-			proxyBin, err := a.Caddy.ProxyBin()
-			if err != nil {
-				return err
-			}
-			if !a.Run.RunWith(runner.Opts{Interactive: a.UI.Interactive}, proxyBin, "trust").OK() {
-				a.UI.Warn(fmt.Sprintf("Trust failed - retry with: %s trust", proxyBin))
-			}
+			a.Platform.TrustCA(proxyBin)
 
-			a.UI.Outro(`Done! Make sure your shell loads direnv (zsh: eval "$(direnv hook zsh)" in ~/.zshrc). Then, in a project: igor add <name>`)
+			a.UI.Outro(`Done! Make sure your shell loads direnv (e.g. eval "$(direnv hook zsh)" or bash). Then, in a project: igor add <name>`)
 			return nil
 		},
 	}
@@ -275,9 +224,10 @@ func (a *App) cmdAdd() *cobra.Command {
 			if err := a.Caddy.WriteRoute(name, entry.Port); err != nil {
 				return err
 			}
-			if err := a.Launchd.Start(name); err != nil {
+			if err := a.Sup.Start(name); err != nil {
 				return err
 			}
+			_ = a.Platform.SyncHosts()
 			if err := a.ReloadProxyOrWarn(); err != nil {
 				return err
 			}
@@ -341,6 +291,7 @@ func (a *App) cmdProxy() *cobra.Command {
 			if err := a.Caddy.WriteRoute(name, args[1]); err != nil {
 				return err
 			}
+			_ = a.Platform.SyncHosts()
 			if err := a.ReloadProxyOrWarn(); err != nil {
 				return err
 			}
@@ -380,13 +331,13 @@ func (a *App) cmdService() *cobra.Command {
 				route = routeFlag
 			}
 
-			var envs []launchd.EnvVar
+			var envs []supervisor.EnvVar
 			for _, pair := range envFlags {
 				idx := strings.IndexByte(pair, '=')
 				if idx <= 0 {
 					return fmt.Errorf("--env needs KEY=VALUE")
 				}
-				envs = append(envs, launchd.EnvVar{Key: pair[:idx], Value: pair[idx+1:]})
+				envs = append(envs, supervisor.EnvVar{Key: pair[:idx], Value: pair[idx+1:]})
 			}
 
 			if _, err := os.Stat(a.Cfg.Caddyfile); err != nil {
@@ -399,9 +350,9 @@ func (a *App) cmdService() *cobra.Command {
 
 			exe := cmdArgs[0]
 			if !strings.Contains(exe, "/") {
-				found, err := a.Run.LookPath(exe, "/opt/homebrew/bin", "/usr/local/bin")
+				found, err := a.Run.LookPath(exe, a.Platform.ExtraLookPaths()...)
 				if err != nil {
-					return fmt.Errorf("'%s' not found - install it first (e.g. brew install %s)", exe, exe)
+					return fmt.Errorf("'%s' not found - install it first (e.g. %s)", exe, a.Platform.InstallHint(exe))
 				}
 				exe = found
 			}
@@ -426,7 +377,7 @@ func (a *App) cmdService() *cobra.Command {
 			}
 
 			progArgs := append([]string{exe}, cmdArgs[1:]...)
-			changed, err := a.Launchd.WritePlist(name, dataDir, "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", progArgs, envs, nil)
+			changed, err := a.Sup.WriteUnit(name, dataDir, a.Platform.ServicePATH(), progArgs, envs, nil)
 			if err != nil {
 				return err
 			}
@@ -436,11 +387,11 @@ func (a *App) cmdService() *cobra.Command {
 				offset = st.Size()
 			}
 			if changed {
-				if err := a.Launchd.Stop(name); err != nil {
+				if err := a.Sup.Stop(name); err != nil {
 					return err
 				}
 			}
-			if err := a.Launchd.Start(name); err != nil {
+			if err := a.Sup.Start(name); err != nil {
 				return err
 			}
 
@@ -451,6 +402,7 @@ func (a *App) cmdService() *cobra.Command {
 			} else {
 				a.Caddy.RemoveRoute(name)
 			}
+			_ = a.Platform.SyncHosts()
 			if err := a.ReloadProxyOrWarn(); err != nil {
 				return err
 			}
@@ -468,7 +420,7 @@ func (a *App) cmdService() *cobra.Command {
 			if a.Run.IsFake() {
 				wait = 0
 			}
-			return a.Launchd.CheckAlive(name, offset, wait)
+			return a.Sup.CheckAlive(name, offset, wait)
 		},
 	}
 	addCmd.Flags().StringVar(&routeFlag, "route", "", "Serve web UI on https://<name>.test -> 127.0.0.1:<port>")
@@ -527,15 +479,16 @@ func (a *App) removeEntry(name string) error {
 		return fmt.Errorf("no site, service or route '%s'", name)
 	}
 	for _, w := range a.Workers.SiteWorkers(name) {
-		_ = a.Launchd.Remove(w)
+		_ = a.Sup.Remove(w)
 	}
-	_ = a.Launchd.Remove(a.Cfg.WatcherName(name))
-	_ = a.Launchd.Remove(name)
+	_ = a.Sup.Remove(a.Cfg.WatcherName(name))
+	_ = a.Sup.Remove(name)
 	a.Caddy.RemoveRoute(name)
 	_ = os.Remove(a.Cfg.BackendCaddyfilePath(name))
 	if err := a.Registry.Remove(name); err != nil {
 		return err
 	}
+	_ = a.Platform.SyncHosts()
 	if err := a.ReloadProxyOrWarn(); err != nil {
 		return err
 	}
@@ -588,7 +541,7 @@ func (a *App) cmdWorkers() *cobra.Command {
 			var rows [][]string
 			for _, w := range a.Workers.SiteWorkers(site) {
 				state := "stopped"
-				if a.Launchd.IsRunning(w) {
+				if a.Sup.IsRunning(w) {
 					state = "running"
 				}
 				rows = append(rows, []string{a.Cfg.DisplayAgentName(w), state})
