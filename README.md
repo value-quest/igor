@@ -32,8 +32,9 @@ App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like
 You need macOS with [Homebrew](https://brew.sh). igor is a single native Go binary with zero runtime dependencies.
 
 ```bash
-# 1. install igor via Homebrew
-brew install value-quest/tap/igor
+# 1. download igor from GitHub Releases (Apple Silicon; use amd64 for Intel)
+curl -fsSL https://github.com/value-quest/igor/releases/latest/download/igor-darwin-arm64 -o /usr/local/bin/igor
+chmod +x /usr/local/bin/igor
 
 # 2. install the PHP runtimes (no sudo)
 igor install
@@ -49,9 +50,9 @@ echo 'export PATH="$HOME/.igor/bin:$PATH"' >> ~/.zshrc   # last line, after Herd
 cd ~/Code/portal && igor add portal       # https://portal.test
 ```
 
-<details><summary>Installing from GitHub Releases or building from source</summary>
+<details><summary>Building from source</summary>
 
-Download a prebuilt macOS binary (`igor-darwin-arm64` or `igor-darwin-amd64`) from [GitHub Releases](https://github.com/value-quest/igor/releases), or build locally with Go 1.24+:
+Build locally with Go 1.24+:
 
 ```bash
 git clone https://github.com/value-quest/igor.git ~/igor
@@ -101,7 +102,7 @@ Your sites, configs and service data stay as they are in between. dnsmasq keeps 
 igor update --check     # installed vs. available PHP and FrankenPHP versions, changes nothing
 igor update             # install what's new, then restart everything on it
 igor update --force     # reinstall even if up to date, e.g. after a build fix
-brew upgrade igor       # update igor itself (or `igor self-update` for standalone binaries)
+igor self-update        # update igor itself from GitHub Releases
 ```
 
 **`igor update`** compares your runtimes with the latest suite release, installs only what changed and then runs `igor refresh --restart`. That restarts the proxy, sites, workers and services on the new binaries. It's the same command as `igor install`; only the name differs.
@@ -260,17 +261,13 @@ make build      # builds ./igor for your current macOS architecture
 make dist       # cross-compiles dist/igor-darwin-{arm64,amd64}
 ```
 
-Releases are automated via [GoReleaser](.goreleaser.yaml) and [GitHub Actions](.github/workflows/release.yml):
-
-1. Create a `value-quest/homebrew-tap` repository on GitHub (if it doesn't exist yet).
-2. Add a `HOMEBREW_TAP_GITHUB_TOKEN` repository secret (a PAT with `repo` / `contents:write` access to `value-quest/homebrew-tap`).
-3. Push a version tag:
+Releases are automated via [GoReleaser](.goreleaser.yaml) and [GitHub Actions](.github/workflows/release.yml). Push a version tag to build and publish a GitHub Release:
 
 ```bash
 git tag v2.0.0 && git push --tags
 ```
 
-GoReleaser builds signed-ready macOS `arm64`/`amd64` binaries (`igor-darwin-arm64`, `igor-darwin-amd64` for `igor self-update`, plus `.tar.gz` archives), publishes the GitHub Release, and updates `Formula/igor.rb` in `value-quest/homebrew-tap`.
+GoReleaser builds macOS `arm64`/`amd64` binaries (`igor-darwin-arm64`, `igor-darwin-amd64` for `igor self-update`, plus `.tar.gz` archives) and publishes them to GitHub Releases.
 
 ## Files
 
