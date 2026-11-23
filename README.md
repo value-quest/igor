@@ -2,7 +2,7 @@
 
 _Frankenstein's assistant: it serves your PHP projects through FrankenPHP so you don't have to._
 
-Local PHP sites on macOS with the ValueQuest FrankenPHP suite: Laravel, Symfony, WordPress or plain PHP. It replaces Herd with a central Caddy proxy in front of one FrankenPHP backend per app.
+Local PHP sites on macOS, Linux, and Windows (WSL2) with the ValueQuest FrankenPHP suite: Laravel, Symfony, WordPress or plain PHP. It replaces Herd with a central Caddy proxy in front of one FrankenPHP backend per app.
 
 ```
 Browser ──https://app.test──▶ front proxy (Caddy local CA, :80/:443)
@@ -13,7 +13,8 @@ App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like
 ## Contents
 
 - [Install and setup](#install-and-setup)
-  - [Trying igor next to Herd](#trying-igor-next-to-herd)
+  - [Linux and WSL2](#linux-and-wsl2)
+  - [Trying igor next to Herd (macOS)](#trying-igor-next-to-herd)
 - [Update](#update)
   - [New and dropped PHP versions](#new-and-dropped-php-versions)
 - [Daily use](#daily-use)
@@ -29,7 +30,9 @@ App ────http://127.0.0.1:81xx──▶ other site directly (no TLS, like
 
 ## Install and setup
 
-You need macOS with [Homebrew](https://brew.sh). igor is a single native Go binary with zero runtime dependencies.
+igor is a single native Go binary with zero runtime dependencies. On macOS you need [Homebrew](https://brew.sh); on Linux / WSL2 see [Linux and WSL2](#linux-and-wsl2) below.
+
+### macOS
 
 ```bash
 # 1. download igor from GitHub Releases (Apple Silicon; use amd64 for Intel)
@@ -49,6 +52,48 @@ echo 'export PATH="$HOME/.igor/bin:$PATH"' >> ~/.zshrc   # last line, after Herd
 # 5. serve your first project
 cd ~/app && igor add app       # https://app.test
 ```
+
+### Linux and WSL2
+
+igor uses `systemd --user` on Linux and WSL2 (no Docker or Homebrew needed).
+
+```bash
+# 1. install prerequisites (Debian/Ubuntu)
+sudo apt update && sudo apt install -y dnsmasq direnv libcap2-bin jq libnss3-tools
+
+# 2. download igor from GitHub Releases (use arm64 on ARM64 Linux/WSL2)
+sudo curl -fsSL https://github.com/value-quest/igor/releases/latest/download/igor-linux-amd64 -o /usr/local/bin/igor
+sudo chmod +x /usr/local/bin/igor
+
+# 3. install the PHP runtimes (no sudo)
+igor install
+
+# 4. set up DNS, ports 80/443 capability, front proxy and local CA
+igor setup
+
+# 5. load direnv and the igor PHP commands in your shell (~/.bashrc or ~/.zshrc)
+echo 'eval "$(direnv hook bash)"' >> ~/.bashrc
+echo 'export PATH="$HOME/.igor/bin:$PATH"' >> ~/.bashrc
+
+# 6. verify everything and serve your first project
+igor doctor
+cd ~/app && igor add app       # https://app.test
+```
+
+- **Native Linux**: `igor setup` configures `/etc/dnsmasq.d/igor.conf` (and `/etc/systemd/resolved.conf.d/igor.conf` when `systemd-resolved` is active) for `*.test`, grants `cap_net_bind_service=+ep` to the front proxy binary via `setcap`, enables user lingering (`loginctl enable-linger`), and trusts the local CA.
+- **WSL2 (Windows)**:
+  - **Enable systemd** in `/etc/wsl.conf` (default on recent WSL2):
+    ```ini
+    [boot]
+    systemd=true
+    ```
+    If you just added this, run `wsl --shutdown` from PowerShell and reopen your WSL terminal.
+  - **Keep projects in the Linux filesystem** (`~/projects/...`), not `/mnt/c/...` (much faster I/O and file watchers work properly).
+  - **Windows browser DNS (`hosts`)**: WSL2 automatically forwards `127.0.0.1:80/443` to Windows, and `igor add`/`rm`/`proxy`/`service` syncs a managed `# igor-start ... # igor-end` block into `C:\Windows\System32\drivers\etc\hosts`. Grant your Windows user write access once in an **elevated PowerShell** so `igor` can update it automatically:
+    ```powershell
+    icacls C:\Windows\System32\drivers\etc\hosts /grant "$($env:USERNAME):(M)"
+    ```
+  - **Windows TLS trust**: `igor setup` automatically imports Caddy's local root CA into your Windows user certificate store (`certutil.exe -addstore -user Root`, no admin needed) so Chrome/Edge trust `https://*.test` with no warnings.
 
 <details><summary>Building from source</summary>
 
@@ -256,18 +301,18 @@ Each binary must run straight from its folder. On macOS that means dylibs in `..
 ## Development & Releases
 
 ```bash
-make test       # runs unit tests + byte-for-byte backwards-compatibility tests against `main`
-make build      # builds ./igor for your current macOS architecture
-make dist       # cross-compiles dist/igor-darwin-{arm64,amd64}
+make test       # runs unit tests (+ macOS bash backwards-compatibility tests on darwin)
+make build      # builds ./igor for your current OS/architecture
+make dist       # cross-compiles dist/igor-{darwin,linux}-{arm64,amd64}
 ```
 
 Releases are automated via [GoReleaser](.goreleaser.yaml) and [GitHub Actions](.github/workflows/release.yml). Push a version tag to build and publish a GitHub Release:
 
 ```bash
-git tag v2.0.0 && git push --tags
+git tag v2.1.0 && git push --tags
 ```
 
-GoReleaser builds macOS `arm64`/`amd64` binaries (`igor-darwin-arm64`, `igor-darwin-amd64` for `igor self-update`, plus `.tar.gz` archives) and publishes them to GitHub Releases.
+GoReleaser builds macOS and Linux `arm64`/`amd64` binaries (`igor-{darwin,linux}-{arm64,amd64}` for `igor self-update`, plus `.tar.gz` archives) and publishes them to GitHub Releases.
 
 ## Files
 
@@ -279,7 +324,8 @@ GoReleaser builds macOS `arm64`/`amd64` binaries (`igor-darwin-arm64`, `igor-dar
 | `~/.igor/php/99-igor.ini` | shared php.ini settings (web and CLI, via `PHP_INI_SCAN_DIR`) |
 | `~/.igor/data/<service>/` | working folder and data of each service |
 | `~/.igor/logs/` | one log per site and per worker (`<site>@<worker>.log`), plus `proxy.log` |
-| `~/Library/LaunchAgents/dev.igor.*.plist` | LaunchAgents for the proxy, sites and workers (`<site>@<worker>`): start at login, restart if they crash. Plus one watcher per site (`<site>~watch`) that runs on changes to `.php-version`, `composer.json` or `Procfile.dev` |
+| `~/Library/LaunchAgents/dev.igor.*.plist` | (macOS) LaunchAgents for the proxy, sites, workers (`<site>@<worker>`), and file watchers (`<site>~watch`) |
+| `~/.config/systemd/user/dev.igor.*` | (Linux / WSL2) `systemd --user` `.service` units for the proxy, sites and workers, plus `.path`/`.service` pairs for file watchers |
 
 ## Notes
 
