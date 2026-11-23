@@ -215,20 +215,22 @@ func (a *App) cmdDoctor() *cobra.Command {
 			a.UI.Intro("igor doctor")
 
 			var (
-				brewPath    string
-				direnvPath  string
-				brewPrefix  string
-				hasDnsmasq  bool
-				proxyUp     bool
-				herdRunning bool
-				wg          sync.WaitGroup
+				brewPath       string
+				direnvPath     string
+				brewPrefix     string
+				hasDnsmasq     bool
+				dnsmasqRunning bool
+				proxyUp        bool
+				herdRunning    bool
+				wg             sync.WaitGroup
 			)
 
-			wg.Add(6)
+			wg.Add(7)
 			go func() { defer wg.Done(); brewPath, _ = a.Run.LookPath("brew") }()
 			go func() { defer wg.Done(); direnvPath, _ = a.Run.LookPath("direnv") }()
 			go func() { defer wg.Done(); brewPrefix = strings.TrimSpace(a.Run.Run("brew", "--prefix").Stdout) }()
 			go func() { defer wg.Done(); hasDnsmasq = a.Run.Run("brew", "list", "dnsmasq").OK() }()
+			go func() { defer wg.Done(); dnsmasqRunning = a.Run.Run("pgrep", "-x", "dnsmasq").OK() }()
 			go func() { defer wg.Done(); proxyUp = a.Launchd.IsRunning("proxy") }()
 			go func() { defer wg.Done(); herdRunning = a.Run.Run("pgrep", "-qf", "Herd").OK() }()
 			wg.Wait()
@@ -259,8 +261,11 @@ func (a *App) cmdDoctor() *cobra.Command {
 				}
 			}
 			switch {
-			case hasDnsmasq && hasRule:
+			case hasDnsmasq && hasRule && dnsmasqRunning:
 				rows = append(rows, []string{"dnsmasq", "OK", fmt.Sprintf("*.%s -> 127.0.0.1 (%s)", a.Cfg.TLD, dnsmasqConf)})
+			case hasDnsmasq && hasRule:
+				rows = append(rows, []string{"dnsmasq", "FAIL", "Configured, but not running (run 'sudo brew services restart dnsmasq' or 'igor setup')"})
+				failures++
 			case hasDnsmasq:
 				rows = append(rows, []string{"dnsmasq", "WARN", fmt.Sprintf("Installed, but *.%s rule missing (run 'igor setup')", a.Cfg.TLD)})
 				warnings++
@@ -269,7 +274,7 @@ func (a *App) cmdDoctor() *cobra.Command {
 				failures++
 			}
 
-			resolverFile := "/etc/resolver/" + a.Cfg.TLD
+			resolverFile := a.Cfg.ResolverPath()
 			if raw, err := os.ReadFile(resolverFile); err == nil && strings.TrimSpace(string(raw)) == "nameserver 127.0.0.1" {
 				rows = append(rows, []string{fmt.Sprintf("Resolver (%s)", resolverFile), "OK", "nameserver 127.0.0.1"})
 			} else {

@@ -67,11 +67,11 @@ func (a *App) cmdSetup() *cobra.Command {
 				return fmt.Errorf("failed to restart dnsmasq")
 			}
 
-			resolverFile := "/etc/resolver/" + a.Cfg.TLD
+			resolverFile := a.Cfg.ResolverPath()
 			curRes, _ := os.ReadFile(resolverFile)
 			if strings.TrimSpace(string(curRes)) != "nameserver 127.0.0.1" {
 				a.UI.Info(fmt.Sprintf("Creating %s (sudo)", resolverFile))
-				a.Run.RunWith(runner.Opts{Interactive: a.UI.Interactive}, "sudo", "mkdir", "-p", "/etc/resolver")
+				a.Run.RunWith(runner.Opts{Interactive: a.UI.Interactive}, "sudo", "mkdir", "-p", filepath.Dir(resolverFile))
 				a.Run.RunWith(runner.Opts{Stdin: strings.NewReader("nameserver 127.0.0.1\n")}, "sudo", "tee", resolverFile)
 			}
 

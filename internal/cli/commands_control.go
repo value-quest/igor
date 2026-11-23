@@ -25,6 +25,7 @@ func (a *App) cmdStart() *cobra.Command {
 					return err
 				}
 				a.UI.Info(args[0] + " started")
+				a.checkDNS()
 				return nil
 			}
 
@@ -46,9 +47,52 @@ func (a *App) cmdStart() *cobra.Command {
 				}
 				a.UI.Note(n + " started")
 			}
+			a.checkDNS()
 			a.UI.Outro(fmt.Sprintf("igor is running: https://<name>.%s", a.Cfg.TLD))
 			return nil
 		},
+	}
+}
+
+func (a *App) checkDNS() {
+	resolverFile := a.Cfg.ResolverPath()
+	raw, err := os.ReadFile(resolverFile)
+	if err != nil || strings.TrimSpace(string(raw)) != "nameserver 127.0.0.1" {
+		a.UI.Warn(fmt.Sprintf("Resolver %s is missing or wrong (often removed by Herd) - *.%s domains won't resolve", resolverFile, a.Cfg.TLD))
+		if a.UI.Interactive {
+			ok, confirmErr := a.UI.Confirm(fmt.Sprintf("Recreate %s now (needs sudo)?", resolverFile), true)
+			if confirmErr == nil && ok {
+				mkRes := a.Run.RunWith(runner.Opts{Interactive: true}, "sudo", "mkdir", "-p", filepath.Dir(resolverFile))
+				teeRes := a.Run.RunWith(runner.Opts{Stdin: strings.NewReader("nameserver 127.0.0.1\n")}, "sudo", "tee", resolverFile)
+				if mkRes.OK() && teeRes.OK() {
+					a.UI.Info("Recreated " + resolverFile)
+				} else {
+					a.UI.Warn(fmt.Sprintf("Could not recreate %s - run 'igor setup'", resolverFile))
+				}
+			} else {
+				a.UI.Note(fmt.Sprintf("Fix with 'igor setup' or: echo \"nameserver 127.0.0.1\" | sudo tee %s", resolverFile))
+			}
+		} else {
+			a.UI.Note(fmt.Sprintf("Fix with 'igor setup' or: echo \"nameserver 127.0.0.1\" | sudo tee %s", resolverFile))
+		}
+	}
+
+	if !a.Run.Run("pgrep", "-x", "dnsmasq").OK() {
+		a.UI.Warn(fmt.Sprintf("dnsmasq is not running - *.%s domains won't resolve", a.Cfg.TLD))
+		if a.UI.Interactive {
+			ok, confirmErr := a.UI.Confirm("Start dnsmasq now (needs sudo)?", true)
+			if confirmErr == nil && ok {
+				if a.Run.RunWith(runner.Opts{Interactive: true}, "sudo", "brew", "services", "restart", "dnsmasq").OK() {
+					a.UI.Info("Started dnsmasq")
+				} else {
+					a.UI.Warn("Failed to start dnsmasq - run 'sudo brew services restart dnsmasq' or 'igor setup'")
+				}
+			} else {
+				a.UI.Note("Fix with 'sudo brew services restart dnsmasq' or 'igor setup'")
+			}
+		} else {
+			a.UI.Note("Fix with 'sudo brew services restart dnsmasq' or 'igor setup'")
+		}
 	}
 }
 

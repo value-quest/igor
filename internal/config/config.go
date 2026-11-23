@@ -22,6 +22,7 @@ type Config struct {
 	SuiteRepo    string
 	IgorRepo     string
 	AgentsDir    string
+	ResolverDir  string
 	RegistryFile string
 	Caddyfile    string
 	SitesDir     string
@@ -71,6 +72,7 @@ func New(home, igorHome, igorBin, phpRoot, tld, suiteRepo, igorRepo, agentsDir s
 		SuiteRepo:    suiteRepo,
 		IgorRepo:     igorRepo,
 		AgentsDir:    agentsDir,
+		ResolverDir:  "/etc/resolver",
 		RegistryFile: filepath.Join(igorHome, "sites.tsv"),
 		Caddyfile:    filepath.Join(igorHome, "Caddyfile"),
 		SitesDir:     filepath.Join(igorHome, "sites"),
@@ -113,6 +115,14 @@ func (c *Config) ServiceDataDir(name string) string {
 
 func (c *Config) WatcherName(site string) string {
 	return site + "~watch"
+}
+
+func (c *Config) ResolverPath() string {
+	dir := c.ResolverDir
+	if dir == "" {
+		dir = "/etc/resolver"
+	}
+	return filepath.Join(dir, c.TLD)
 }
 
 func (c *Config) AgentName(input string) string {

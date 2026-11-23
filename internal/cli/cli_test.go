@@ -345,3 +345,52 @@ func TestDoctorAndUninstall(t *testing.T) {
 		t.Fatalf("expected php8.4 removed")
 	}
 }
+
+func TestStartDNSSafeguard(t *testing.T) {
+	env := newTestEnv(t)
+	env.setupCaddy()
+	resolverDir := filepath.Join(env.tmpDir, "resolver")
+	env.cfg.ResolverDir = resolverDir
+
+	dnsmasqUp := false
+	env.fake.handler = func(name string, args []string) runner.Result {
+		if name == "lsof" {
+			return runner.Result{ExitCode: 1}
+		}
+		if name == "pgrep" && len(args) >= 2 && args[0] == "-x" && args[1] == "dnsmasq" {
+			if dnsmasqUp {
+				return runner.Result{Stdout: "545\n"}
+			}
+			return runner.Result{ExitCode: 1}
+		}
+		if name == "launchctl" && len(args) > 0 && args[0] == "print" {
+			return runner.Result{ExitCode: 1}
+		}
+		return runner.Result{}
+	}
+
+	// Missing resolver + stopped dnsmasq should warn with fix hints
+	out, err := env.run("start")
+	if err != nil {
+		t.Fatalf("start failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "is missing or wrong") {
+		t.Fatalf("expected missing resolver warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "dnsmasq is not running") {
+		t.Fatalf("expected stopped dnsmasq warning, got:\n%s", out)
+	}
+
+	// Valid resolver + running dnsmasq should produce no DNS warnings
+	_ = os.MkdirAll(resolverDir, 0o755)
+	_ = os.WriteFile(filepath.Join(resolverDir, "test"), []byte("nameserver 127.0.0.1\n"), 0o644)
+	dnsmasqUp = true
+
+	out, err = env.run("start")
+	if err != nil {
+		t.Fatalf("start failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "is missing or wrong") || strings.Contains(out, "dnsmasq is not running") {
+		t.Fatalf("expected no DNS warnings when healthy, got:\n%s", out)
+	}
+}
