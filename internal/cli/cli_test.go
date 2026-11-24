@@ -163,10 +163,12 @@ func TestAddListInfoRemoveSite(t *testing.T) {
 		t.Fatalf("expected watcher unit at %s", env.app.Sup.UnitPath("portal.valuequest~watch"))
 	}
 
-	// Info
-	out, err = env.run("info", "portal.valuequest")
-	if err != nil || !strings.Contains(out, "http://127.0.0.1:8101") {
-		t.Fatalf("info failed: %v\n%s", err, out)
+	// Info & status alias (includes PHP version)
+	for _, sub := range []string{"info", "status"} {
+		out, err = env.run(sub, "portal.valuequest")
+		if err != nil || !strings.Contains(out, "http://127.0.0.1:8101") || !strings.Contains(out, "PHP:") || !strings.Contains(out, "8.4") {
+			t.Fatalf("%s failed: %v\n%s", sub, err, out)
+		}
 	}
 
 	// List (parallel goroutines)

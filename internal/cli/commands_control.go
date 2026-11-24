@@ -320,8 +320,9 @@ func (a *App) cmdLogs() *cobra.Command {
 
 func (a *App) cmdInfo() *cobra.Command {
 	return &cobra.Command{
-		Use:   "info [<name>]",
-		Short: "Show URLs and .env hints for internal access",
+		Use:     "info [<name>]",
+		Aliases: []string{"status"},
+		Short:   "Show URLs, PHP version, and .env hints for internal access",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := ""
 			if len(args) > 0 {
@@ -367,6 +368,15 @@ func (a *App) cmdInfo() *cobra.Command {
 			lines := []string{
 				fmt.Sprintf("Browser:   https://%s.%s", name, a.Cfg.TLD),
 				fmt.Sprintf("Internal:  http://127.0.0.1:%s     (server-to-server, no TLS)", entry.Port),
+			}
+			if entry.Type == "php" {
+				phpLine := entry.PHP
+				if patch := a.Runtimes.InstalledPHPPatch(entry.PHP); patch != "" {
+					phpLine = fmt.Sprintf("%s (%s)", entry.PHP, patch)
+				}
+				lines = append(lines, "PHP:       "+phpLine)
+			}
+			lines = append(lines,
 				"",
 				fmt.Sprintf(".env hints for apps talking to '%s' (Laravel-style examples):", name),
 				"  # SSO: browser redirects public, back-channel internal",
@@ -374,12 +384,12 @@ func (a *App) cmdInfo() *cobra.Command {
 				fmt.Sprintf("  SSO_INTERNAL_URL=http://127.0.0.1:%s", entry.Port),
 				"  # Reverb: server publishes internally, browser connects via the proxy",
 				"  REVERB_HOST=127.0.0.1",
-				"  REVERB_PORT=" + entry.Port,
+				"  REVERB_PORT="+entry.Port,
 				"  REVERB_SCHEME=http",
 				fmt.Sprintf("  VITE_REVERB_HOST=%s.%s", name, a.Cfg.TLD),
 				"  VITE_REVERB_PORT=443",
 				"  VITE_REVERB_SCHEME=https",
-			}
+			)
 			a.UI.Callout("Site: "+name, lines, false)
 			return nil
 		},
