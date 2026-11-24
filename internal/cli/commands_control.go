@@ -509,7 +509,7 @@ func (a *App) runRefresh(only string, force bool) error {
 			return err
 		}
 		if a.Cfg.IsWatch {
-			fmt.Fprintf(a.UI.Out, "--- %s .php-version, composer.json or Procfile.dev changed\n", time.Now().Format("2006-01-02 15:04:05"))
+			fmt.Fprintf(a.UI.Out, "--- %s .php-version, composer.json, Procfile.dev or git branch changed\n", time.Now().Format("2006-01-02 15:04:05"))
 		}
 		if err := a.RefreshSite(only, force); err != nil {
 			return err

@@ -2,11 +2,13 @@ package runner
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 type Result struct {
@@ -25,6 +27,7 @@ type Opts struct {
 	Env         []string
 	Stdin       io.Reader
 	Interactive bool
+	Timeout     time.Duration
 }
 
 type Runner interface {
@@ -46,7 +49,14 @@ func (e *ExecRunner) Run(name string, args ...string) Result {
 }
 
 func (e *ExecRunner) RunWith(opts Opts, name string, args ...string) Result {
-	cmd := exec.Command(name, args...)
+	var cmd *exec.Cmd
+	if opts.Timeout > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+		defer cancel()
+		cmd = exec.CommandContext(ctx, name, args...)
+	} else {
+		cmd = exec.Command(name, args...)
+	}
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	}

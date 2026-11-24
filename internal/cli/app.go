@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/value-quest/igor/internal/caddy"
@@ -226,7 +228,130 @@ func (a *App) RefreshSite(name string, force bool) error {
 			return err
 		}
 	}
+
+	if oldBr, newBr, branchChanged := worker.CheckAndUpdateBranch(a.Cfg, name, entry.Dir); branchChanged {
+		a.runBranchSync(name, *entry, oldBr, newBr)
+	}
 	return nil
+}
+
+func (a *App) runBranchSync(name string, entry registry.Entry, oldBr, newBr string) {
+	a.UI.Info(fmt.Sprintf("  branch changed: %s -> %s", oldBr, newBr))
+
+	phpBin := a.Cfg.PHPBin(entry.PHP)
+	nodeSearchPaths := []string{
+		filepath.Join(a.Cfg.Home, ".nvm", "current", "bin"),
+		filepath.Join(a.Cfg.Home, ".volta", "bin"),
+		filepath.Join(a.Cfg.Home, ".fnm", "current", "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+	}
+
+	var ran, failed []string
+
+	// Check upfront which steps will run so we can notify before starting
+	_, hasComposerLock := os.Stat(filepath.Join(entry.Dir, "composer.lock"))
+	_, hasComposerJSON := os.Stat(filepath.Join(entry.Dir, "composer.json"))
+	hasComposer := hasComposerLock == nil || hasComposerJSON == nil
+	_, packageErr := os.Stat(filepath.Join(entry.Dir, "package.json"))
+	hasPackageJSON := packageErr == nil
+
+	var planned []string
+	if hasComposer {
+		planned = append(planned, "composer install")
+	}
+	if hasPackageJSON {
+		planned = append(planned, "npm install")
+		if worker.HasNpmBuildScript(entry.Dir) {
+			planned = append(planned, "npm run build")
+		}
+	}
+	if len(planned) > 0 {
+		a.Notify(fmt.Sprintf("%s switched to %s - running %s...", name, newBr, strings.Join(planned, ", ")))
+	}
+
+	const stepTimeout = 5 * time.Minute
+
+	// 1. composer install (if composer.lock or composer.json exists)
+	if hasComposer {
+		composerBin := filepath.Join(phpBin, "composer")
+		env := []string{
+			"PATH=" + phpBin + ":" + os.Getenv("PATH"),
+			"PHP_INI_SCAN_DIR=" + a.Cfg.IniDir,
+			"COMPOSER_NO_INTERACTION=1",
+		}
+		a.UI.Note("  running composer install...")
+		res := a.Run.RunWith(runner.Opts{Dir: entry.Dir, Env: env, Timeout: stepTimeout}, composerBin, "install", "--no-interaction")
+		if res.OK() {
+			ran = append(ran, "composer install")
+			a.UI.Note("  composer install done")
+		} else {
+			failed = append(failed, "composer install")
+			a.UI.Warn("  composer install failed: " + firstNonEmptyLine(res.Stderr, res.Stdout))
+		}
+	}
+
+	// 2. npm install & npm run build (if package.json exists)
+	if hasPackageJSON {
+		npmBin, err := a.Run.LookPath("npm", nodeSearchPaths...)
+		if err != nil {
+			a.UI.Warn("  npm not found on PATH - skipped npm install/build")
+		} else {
+			npmDir := filepath.Dir(npmBin)
+			env := []string{
+				"PATH=" + npmDir + ":" + phpBin + ":" + os.Getenv("PATH"),
+				"CI=true",
+			}
+			a.UI.Note("  running npm install...")
+			res := a.Run.RunWith(runner.Opts{Dir: entry.Dir, Env: env, Timeout: stepTimeout}, npmBin, "install", "--no-audit", "--no-fund")
+			if res.OK() {
+				ran = append(ran, "npm install")
+				a.UI.Note("  npm install done")
+
+				if worker.HasNpmBuildScript(entry.Dir) {
+					a.UI.Note("  running npm run build...")
+					buildRes := a.Run.RunWith(runner.Opts{Dir: entry.Dir, Env: env, Timeout: stepTimeout}, npmBin, "run", "build")
+					if buildRes.OK() {
+						ran = append(ran, "npm run build")
+						a.UI.Note("  npm run build done")
+					} else {
+						failed = append(failed, "npm run build")
+						a.UI.Warn("  npm run build failed: " + firstNonEmptyLine(buildRes.Stderr, buildRes.Stdout))
+					}
+				}
+			} else {
+				failed = append(failed, "npm install")
+				a.UI.Warn("  npm install failed: " + firstNonEmptyLine(res.Stderr, res.Stdout))
+			}
+		}
+	}
+
+	// Restart the site and any running workers (queue, reverb, schedule, ...) so they pick up new vendor/ & code
+	if bounced, err := a.Launchd.Bounce(name, false, true); err == nil && bounced {
+		a.UI.Note("  restarted " + name)
+	}
+	for _, w := range a.Workers.SiteWorkers(name) {
+		if bounced, err := a.Launchd.Bounce(w, false, true); err == nil && bounced {
+			a.UI.Note("  restarted " + a.Cfg.DisplayAgentName(w))
+		}
+	}
+
+	if len(failed) > 0 {
+		a.Notify(fmt.Sprintf("%s (%s): %s failed - see 'igor logs %s:watch'", name, newBr, strings.Join(failed, ", "), name))
+	} else if len(ran) > 0 {
+		a.Notify(fmt.Sprintf("%s (%s): done (%s)", name, newBr, strings.Join(ran, ", ")))
+	}
+}
+
+func firstNonEmptyLine(sources ...string) string {
+	for _, s := range sources {
+		for _, line := range strings.Split(s, "\n") {
+			if t := strings.TrimSpace(line); t != "" {
+				return t
+			}
+		}
+	}
+	return "unknown error"
 }
 
 func (a *App) RootCmd() *cobra.Command {

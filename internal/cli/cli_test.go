@@ -396,3 +396,111 @@ func TestStartDNSSafeguard(t *testing.T) {
 		t.Fatalf("expected no DNS warnings when healthy, got:\n%s", out)
 	}
 }
+
+func TestBranchChangeSyncsComposerAndNpm(t *testing.T) {
+	env := newTestEnv(t)
+	env.setupCaddy()
+	proj := env.makeProject("shop")
+	gitDir := filepath.Join(proj, ".git")
+	_ = os.MkdirAll(gitDir, 0o755)
+	_ = os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(proj, ".php-version"), []byte("8.4\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(proj, "composer.json"), []byte(`{"name":"test/shop"}`), 0o644)
+	_ = os.WriteFile(filepath.Join(proj, "package.json"), []byte(`{"scripts":{"build":"vite build"}}`), 0o644)
+	_ = os.WriteFile(filepath.Join(proj, "Procfile.dev"), []byte("queue: php artisan queue:listen\n"), 0o644)
+
+	_ = env.app.Registry.Add(registry.Entry{Name: "shop", Port: "8101", Type: "php", PHP: "8.4", Dir: proj, Docroot: "public"})
+
+	running := map[string]bool{}
+	var ranCmds []string
+	var restartedWorkers []string
+	env.fake.handler = func(name string, args []string) runner.Result {
+		if name == "which" && len(args) > 0 && args[0] == "npm" {
+			return runner.Result{Stdout: "/usr/local/bin/npm\n"}
+		}
+		if name == "launchctl" && len(args) >= 2 {
+			switch args[0] {
+			case "bootstrap":
+				if len(args) >= 3 {
+					label := strings.TrimSuffix(filepath.Base(args[2]), ".plist")
+					running[label] = true
+					if strings.Contains(label, "@queue") {
+						restartedWorkers = append(restartedWorkers, label)
+					}
+				}
+				return runner.Result{}
+			case "bootout":
+				if idx := strings.LastIndexByte(args[1], '/'); idx >= 0 {
+					delete(running, args[1][idx+1:])
+				}
+				return runner.Result{}
+			case "print":
+				if idx := strings.LastIndexByte(args[1], '/'); idx >= 0 && running[args[1][idx+1:]] {
+					return runner.Result{Stdout: "\tstate = running\n"}
+				}
+				return runner.Result{ExitCode: 1}
+			}
+		}
+		if strings.HasSuffix(name, "/composer") || name == "/usr/local/bin/npm" {
+			ranCmds = append(ranCmds, filepath.Base(name)+" "+strings.Join(args, " "))
+		}
+		return runner.Result{}
+	}
+
+	// 1. Initial refresh on main: seeds branch state, must NOT run composer/npm, and adds .git/HEAD to watcher plist
+	if out, err := env.run("refresh", "shop"); err != nil {
+		t.Fatalf("initial refresh failed: %v\n%s", err, out)
+	}
+	if len(ranCmds) != 0 {
+		t.Fatalf("expected no composer/npm runs on initial seed, got: %v", ranCmds)
+	}
+	plist, _ := os.ReadFile(env.cfg.PlistPath("shop~watch"))
+	if !strings.Contains(string(plist), filepath.Join(gitDir, "HEAD")) {
+		t.Fatalf("expected .git/HEAD in watcher plist:\n%s", string(plist))
+	}
+
+	// 2. Switch branch to dev: should run composer install, npm install, npm run build AND restart running worker
+	restartedWorkers = nil
+	_ = os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/dev\n"), 0o644)
+	if out, err := env.run("refresh", "shop"); err != nil {
+		t.Fatalf("branch-change refresh failed: %v\n%s", err, out)
+	}
+	want := []string{"composer install --no-interaction", "npm install --no-audit --no-fund", "npm run build"}
+	if strings.Join(ranCmds, "|") != strings.Join(want, "|") {
+		t.Fatalf("expected %v, got %v", want, ranCmds)
+	}
+	if len(restartedWorkers) == 0 {
+		t.Fatalf("expected running worker shop@queue to be restarted after branch sync")
+	}
+
+	// 3. Re-running on same branch dev should NOT re-run composer/npm
+	ranCmds = nil
+	if out, err := env.run("refresh", "shop"); err != nil {
+		t.Fatalf("second refresh on dev failed: %v\n%s", err, out)
+	}
+	if len(ranCmds) != 0 {
+		t.Fatalf("expected no re-run on unchanged branch, got: %v", ranCmds)
+	}
+
+	// 4. Switch to feature branch without scripts.build: should run composer install + npm install only
+	_ = os.WriteFile(filepath.Join(proj, "package.json"), []byte(`{"scripts":{"dev":"vite"}}`), 0o644)
+	_ = os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/feat/no-build\n"), 0o644)
+	if out, err := env.run("refresh", "shop"); err != nil {
+		t.Fatalf("feat refresh failed: %v\n%s", err, out)
+	}
+	wantNoBuild := []string{"composer install --no-interaction", "npm install --no-audit --no-fund"}
+	if strings.Join(ranCmds, "|") != strings.Join(wantNoBuild, "|") {
+		t.Fatalf("expected %v, got %v", wantNoBuild, ranCmds)
+	}
+
+	// 5. Rebase in progress should be skipped
+	ranCmds = nil
+	_ = os.MkdirAll(filepath.Join(gitDir, "rebase-merge"), 0o755)
+	_ = os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/other\n"), 0o644)
+	if out, err := env.run("refresh", "shop"); err != nil {
+		t.Fatalf("rebase refresh failed: %v\n%s", err, out)
+	}
+	if len(ranCmds) != 0 {
+		t.Fatalf("expected no runs during rebase, got: %v", ranCmds)
+	}
+}

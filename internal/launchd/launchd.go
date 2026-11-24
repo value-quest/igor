@@ -71,7 +71,7 @@ func (m *Manager) WritePlist(name, workdir, path string, args []string, extraEnv
 			fmt.Fprintf(&b, "    <string>%s</string>\n", xmlEscape(wp))
 		}
 		b.WriteString("  </array>\n")
-		b.WriteString("  <key>ProcessType</key><string>Background</string>\n")
+		b.WriteString("  <key>ProcessType</key><string>Standard</string>\n")
 	} else {
 		b.WriteString("  <key>RunAtLoad</key><true/>\n")
 		b.WriteString("  <key>KeepAlive</key><true/>\n")

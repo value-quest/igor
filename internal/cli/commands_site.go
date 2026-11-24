@@ -533,6 +533,7 @@ func (a *App) removeEntry(name string) error {
 	_ = a.Launchd.Remove(name)
 	a.Caddy.RemoveRoute(name)
 	_ = os.Remove(a.Cfg.BackendCaddyfilePath(name))
+	_ = os.Remove(a.Cfg.BranchStatePath(name))
 	if err := a.Registry.Remove(name); err != nil {
 		return err
 	}

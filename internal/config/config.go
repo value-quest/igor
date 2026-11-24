@@ -31,6 +31,7 @@ type Config struct {
 	LogsDir      string
 	IniDir       string
 	DataDir      string
+	StateDir     string
 	IsWatch      bool
 }
 
@@ -81,6 +82,7 @@ func New(home, igorHome, igorBin, phpRoot, tld, suiteRepo, igorRepo, agentsDir s
 		LogsDir:      filepath.Join(igorHome, "logs"),
 		IniDir:       filepath.Join(igorHome, "php"),
 		DataDir:      filepath.Join(igorHome, "data"),
+		StateDir:     filepath.Join(igorHome, "state"),
 		IsWatch:      isWatch,
 	}
 }
@@ -115,6 +117,14 @@ func (c *Config) ServiceDataDir(name string) string {
 
 func (c *Config) WatcherName(site string) string {
 	return site + "~watch"
+}
+
+func (c *Config) BranchStatePath(site string) string {
+	dir := c.StateDir
+	if dir == "" {
+		dir = filepath.Join(c.IgorHome, "state")
+	}
+	return filepath.Join(dir, site+".branch")
 }
 
 func (c *Config) ResolverPath() string {

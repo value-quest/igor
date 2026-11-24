@@ -166,17 +166,36 @@ func (m *Manager) WriteWatcher(entry registry.Entry) error {
 	existed := statErr == nil
 	running := m.launchd.IsRunning(w)
 
+	SeedBranchState(m.cfg, entry.Name, entry.Dir)
+
+	watchPaths := []string{
+		filepath.Join(entry.Dir, ".php-version"),
+		filepath.Join(entry.Dir, "composer.json"),
+		filepath.Join(entry.Dir, "Procfile.dev"),
+	}
+	if headPath, _ := GitHeadPath(entry.Dir); headPath != "" {
+		watchPaths = append(watchPaths, headPath)
+	}
+
+	watchPathEnv := strings.Join([]string{
+		filepath.Join(m.cfg.Home, ".nvm", "current", "bin"),
+		filepath.Join(m.cfg.Home, ".volta", "bin"),
+		filepath.Join(m.cfg.Home, ".fnm", "current", "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin",
+		"/sbin",
+	}, ":")
+
 	changed, err := m.launchd.WritePlist(
 		w,
 		entry.Dir,
-		"/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+		watchPathEnv,
 		[]string{m.cfg.IgorBin, "refresh", entry.Name},
 		[]launchd.EnvVar{{Key: "IGOR_WATCH", Value: "1"}},
-		[]string{
-			filepath.Join(entry.Dir, ".php-version"),
-			filepath.Join(entry.Dir, "composer.json"),
-			filepath.Join(entry.Dir, "Procfile.dev"),
-		},
+		watchPaths,
 	)
 	if err != nil {
 		return err
