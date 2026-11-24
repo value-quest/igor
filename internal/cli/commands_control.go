@@ -47,6 +47,9 @@ func (a *App) cmdStart() *cobra.Command {
 				}
 				a.UI.Note(n + " started")
 			}
+			if _, err := os.Stat(a.Cfg.PlistPath("watch")); err == nil {
+				_ = a.Launchd.Start("watch")
+			}
 			a.checkDNS()
 			a.UI.Outro(fmt.Sprintf("igor is running: https://<name>.%s", a.Cfg.TLD))
 			return nil
@@ -120,6 +123,7 @@ func (a *App) cmdStop() *cobra.Command {
 				a.UI.Note(n + " stopped")
 			}
 			a.UI.Info("Front proxy")
+			_ = a.Launchd.Disable("watch")
 			if err := a.Launchd.Disable("proxy"); err != nil {
 				return err
 			}
@@ -562,6 +566,11 @@ func (a *App) runRefresh(only string, force bool) error {
 		case "proxy":
 			_ = a.Caddy.WriteRoute(e.Name, e.Port)
 		}
+	}
+
+	a.Workers.CleanupLegacyWatchers()
+	if err := a.Workers.EnsureGlobalWatcher(); err != nil {
+		return err
 	}
 
 	if err := a.ReloadProxyOrWarn(); err != nil {

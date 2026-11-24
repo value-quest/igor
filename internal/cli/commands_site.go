@@ -112,6 +112,9 @@ func (a *App) cmdSetup() *cobra.Command {
 				return err
 			}
 
+			a.Workers.CleanupLegacyWatchers()
+			_ = a.Workers.EnsureGlobalWatcher()
+
 			a.UI.Info("Creating PHP CLI shims")
 			shims, err := a.Shims.CreateShims()
 			if err != nil {

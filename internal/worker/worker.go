@@ -44,7 +44,21 @@ func (m *Manager) WriteWorkerRunner() (string, error) {
 		return "", err
 	}
 	file := filepath.Join(m.cfg.ShimDir, "igor-worker")
-	content := "#!/bin/bash\n# igor: runs one Procfile.dev line\nexec /bin/bash -c \"$1\"\n"
+	content := `#!/bin/bash
+# igor: runs one Procfile.dev line using the site's current PHP version
+set -eu
+if [ "${1:-}" = "--site" ]; then
+    site="$2"
+    shift 2
+    IGOR_HOME="${IGOR_HOME:-$HOME/.igor}"
+    PHP_ROOT="${IGOR_PHP_ROOT:-$HOME/frankenphp}"
+    php=$(awk -F'\t' -v n="$site" '$1==n {print $4; exit}' "$IGOR_HOME/sites.tsv")
+    if [ -n "$php" ]; then
+        export PATH="$PHP_ROOT/php$php/bin:$PATH"
+    fi
+fi
+exec /bin/bash -c "$1"
+`
 	if existing, err := os.ReadFile(file); err != nil || string(existing) != content {
 		tmp := file + ".tmp"
 		if err := os.WriteFile(tmp, []byte(content), 0o755); err != nil {
@@ -118,7 +132,6 @@ func (m *Manager) SyncWorkers(entry registry.Entry, keepStopped bool) ([]string,
 			running := m.launchd.IsRunning(agent)
 
 			path := strings.Join([]string{
-				m.cfg.PHPBin(entry.PHP),
 				filepath.Join(entry.Dir, "vendor", "bin"),
 				filepath.Join(entry.Dir, "node_modules", ".bin"),
 				"/opt/homebrew/bin",
@@ -129,7 +142,17 @@ func (m *Manager) SyncWorkers(entry registry.Entry, keepStopped bool) ([]string,
 				"/sbin",
 			}, ":")
 
-			changed, err := m.launchd.WritePlist(agent, entry.Dir, path, []string{runnerPath, w.Cmd}, nil, nil)
+			changed, err := m.launchd.WritePlist(
+				agent,
+				entry.Dir,
+				path,
+				[]string{runnerPath, "--site", entry.Name, w.Cmd},
+				[]launchd.EnvVar{
+					{Key: "IGOR_HOME", Value: m.cfg.IgorHome},
+					{Key: "IGOR_PHP_ROOT", Value: m.cfg.PHPRoot},
+				},
+				nil,
+			)
 			if err != nil {
 				return nil, err
 			}
@@ -160,22 +183,13 @@ func (m *Manager) SyncWorkers(entry registry.Entry, keepStopped bool) ([]string,
 	return changes, nil
 }
 
-func (m *Manager) WriteWatcher(entry registry.Entry) error {
-	w := m.cfg.WatcherName(entry.Name)
-	_, statErr := os.Stat(m.cfg.PlistPath(w))
+// EnsureGlobalWatcher creates/starts the single global `dev.igor.watch` LaunchAgent
+// that watches all registered sites (avoiding per-site watcher plists and macOS banner spam).
+func (m *Manager) EnsureGlobalWatcher() error {
+	const agent = "watch"
+	_, statErr := os.Stat(m.cfg.PlistPath(agent))
 	existed := statErr == nil
-	running := m.launchd.IsRunning(w)
-
-	SeedBranchState(m.cfg, entry.Name, entry.Dir)
-
-	watchPaths := []string{
-		filepath.Join(entry.Dir, ".php-version"),
-		filepath.Join(entry.Dir, "composer.json"),
-		filepath.Join(entry.Dir, "Procfile.dev"),
-	}
-	if headPath, _ := GitHeadPath(entry.Dir); headPath != "" {
-		watchPaths = append(watchPaths, headPath)
-	}
+	running := m.launchd.IsRunning(agent)
 
 	watchPathEnv := strings.Join([]string{
 		filepath.Join(m.cfg.Home, ".nvm", "current", "bin"),
@@ -190,24 +204,48 @@ func (m *Manager) WriteWatcher(entry registry.Entry) error {
 	}, ":")
 
 	changed, err := m.launchd.WritePlist(
-		w,
-		entry.Dir,
+		agent,
+		m.cfg.IgorHome,
 		watchPathEnv,
-		[]string{m.cfg.IgorBin, "refresh", entry.Name},
-		[]launchd.EnvVar{{Key: "IGOR_WATCH", Value: "1"}},
-		watchPaths,
+		[]string{m.cfg.IgorBin, "watch"},
+		[]launchd.EnvVar{
+			{Key: "IGOR_WATCH", Value: "1"},
+			{Key: "IGOR_HOME", Value: m.cfg.IgorHome},
+			{Key: "IGOR_PHP_ROOT", Value: m.cfg.PHPRoot},
+		},
+		nil,
 	)
 	if err != nil {
 		return err
 	}
-	if !existed {
-		return m.launchd.Start(w)
+	if !existed || !running {
+		return m.launchd.Start(agent)
 	}
-	if changed && running {
-		if err := m.launchd.Stop(w); err != nil {
+	if changed {
+		if err := m.launchd.Stop(agent); err != nil {
 			return err
 		}
-		return m.launchd.Start(w)
+		return m.launchd.Start(agent)
 	}
 	return nil
+}
+
+// CleanupLegacyWatchers removes old per-site `dev.igor.<site>~watch.plist` LaunchAgents.
+func (m *Manager) CleanupLegacyWatchers() {
+	pattern := filepath.Join(m.cfg.AgentsDir, config.LabelPrefix+".*~watch.plist")
+	files, _ := filepath.Glob(pattern)
+	prefix := config.LabelPrefix + "."
+	for _, f := range files {
+		base := strings.TrimSuffix(filepath.Base(f), ".plist")
+		if strings.HasPrefix(base, prefix) {
+			agent := strings.TrimPrefix(base, prefix)
+			_ = m.launchd.Remove(agent)
+		}
+	}
+}
+
+// WriteWatcher seeds the site's branch state and ensures the global watcher is running.
+func (m *Manager) WriteWatcher(entry registry.Entry) error {
+	SeedBranchState(m.cfg, entry.Name, entry.Dir)
+	return m.EnsureGlobalWatcher()
 }

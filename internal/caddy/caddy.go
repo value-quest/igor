@@ -78,18 +78,87 @@ import %s/*.caddy
 	return os.WriteFile(m.cfg.Caddyfile, []byte(content), 0o644)
 }
 
+func (m *Manager) WriteProxyRunner() (string, error) {
+	if err := m.cfg.EnsureDir(m.cfg.ShimDir); err != nil {
+		return "", err
+	}
+	file := filepath.Join(m.cfg.ShimDir, "igor-proxy")
+	content := `#!/bin/bash
+# igor: runs the front proxy using the newest installed FrankenPHP runtime
+set -eu
+IGOR_HOME="${IGOR_HOME:-$HOME/.igor}"
+PHP_ROOT="${IGOR_PHP_ROOT:-$HOME/frankenphp}"
+v=$(ls -d "$PHP_ROOT"/php8.* 2>/dev/null | sed 's|.*/php||' | grep -E '^[0-9]+\.[0-9]+$' |
+    sort -t. -k1,1nr -k2,2nr | head -1 || true)
+if [ -z "$v" ] || [ ! -x "$PHP_ROOT/php$v/bin/frankenphp" ]; then
+    echo "igor-proxy: no FrankenPHP runtime installed in $PHP_ROOT" >&2
+    exit 1
+fi
+bin="$PHP_ROOT/php$v/bin"
+export PATH="$bin:/usr/bin:/bin:/usr/sbin:/sbin"
+exec "$bin/frankenphp" run --config "$IGOR_HOME/Caddyfile" --adapter caddyfile
+`
+	if existing, err := os.ReadFile(file); err != nil || string(existing) != content {
+		tmp := file + ".tmp"
+		if err := os.WriteFile(tmp, []byte(content), 0o755); err != nil {
+			return "", err
+		}
+		if err := os.Rename(tmp, file); err != nil {
+			return "", err
+		}
+	}
+	return file, nil
+}
+
+func (m *Manager) WriteSiteRunner() (string, error) {
+	if err := m.cfg.EnsureDir(m.cfg.ShimDir); err != nil {
+		return "", err
+	}
+	file := filepath.Join(m.cfg.ShimDir, "igor-site")
+	content := `#!/bin/bash
+# igor: runs one site's FrankenPHP backend using the PHP version from sites.tsv
+set -eu
+name="$1"
+IGOR_HOME="${IGOR_HOME:-$HOME/.igor}"
+PHP_ROOT="${IGOR_PHP_ROOT:-$HOME/frankenphp}"
+php=$(awk -F'\t' -v n="$name" '$1==n {print $4; exit}' "$IGOR_HOME/sites.tsv")
+if [ -z "$php" ]; then
+    echo "igor-site: site '$name' not found in $IGOR_HOME/sites.tsv" >&2
+    exit 1
+fi
+bin="$PHP_ROOT/php$php/bin"
+export PATH="$bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+exec "$bin/frankenphp" run --config "$IGOR_HOME/backends/$name.Caddyfile" --adapter caddyfile
+`
+	if existing, err := os.ReadFile(file); err != nil || string(existing) != content {
+		tmp := file + ".tmp"
+		if err := os.WriteFile(tmp, []byte(content), 0o755); err != nil {
+			return "", err
+		}
+		if err := os.Rename(tmp, file); err != nil {
+			return "", err
+		}
+	}
+	return file, nil
+}
+
 func (m *Manager) WriteProxyPlist() (bool, error) {
-	newest, err := m.runtimes.NewestPHP()
+	if _, err := m.runtimes.NewestPHP(); err != nil {
+		return false, err
+	}
+	runnerPath, err := m.WriteProxyRunner()
 	if err != nil {
 		return false, err
 	}
-	bin := m.cfg.PHPBin(newest)
 	return m.launchd.WritePlist(
 		"proxy",
 		m.cfg.IgorHome,
-		bin+":/usr/bin:/bin:/usr/sbin:/sbin",
-		[]string{filepath.Join(bin, "frankenphp"), "run", "--config", m.cfg.Caddyfile, "--adapter", "caddyfile"},
-		nil,
+		"/usr/bin:/bin:/usr/sbin:/sbin",
+		[]string{runnerPath},
+		[]launchd.EnvVar{
+			{Key: "IGOR_HOME", Value: m.cfg.IgorHome},
+			{Key: "IGOR_PHP_ROOT", Value: m.cfg.PHPRoot},
+		},
 		nil,
 	)
 }
@@ -131,13 +200,19 @@ func (m *Manager) WriteSite(entry registry.Entry) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	bin := m.cfg.PHPBin(entry.PHP)
+	runnerPath, err := m.WriteSiteRunner()
+	if err != nil {
+		return false, err
+	}
 	plistChanged, err := m.launchd.WritePlist(
 		entry.Name,
 		entry.Dir,
-		bin+":/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-		[]string{filepath.Join(bin, "frankenphp"), "run", "--config", m.cfg.BackendCaddyfilePath(entry.Name), "--adapter", "caddyfile"},
-		nil,
+		"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+		[]string{runnerPath, entry.Name},
+		[]launchd.EnvVar{
+			{Key: "IGOR_HOME", Value: m.cfg.IgorHome},
+			{Key: "IGOR_PHP_ROOT", Value: m.cfg.PHPRoot},
+		},
 		nil,
 	)
 	if err != nil {

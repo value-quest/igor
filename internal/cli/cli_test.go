@@ -159,8 +159,8 @@ func TestAddListInfoRemoveSite(t *testing.T) {
 	if raw, _ := os.ReadFile(filepath.Join(proj, ".php-version")); string(raw) != "8.4\n" {
 		t.Fatalf("unexpected .php-version: %q", string(raw))
 	}
-	if _, err := os.Stat(env.cfg.PlistPath("portal.valuequest~watch")); err != nil {
-		t.Fatalf("expected watcher plist: %v", err)
+	if _, err := os.Stat(env.cfg.PlistPath("watch")); err != nil {
+		t.Fatalf("expected global watcher plist: %v", err)
 	}
 
 	// Info & status alias (includes PHP version)
@@ -236,6 +236,11 @@ func TestRefreshSwitchesPHPAndSyncsWorkers(t *testing.T) {
 		return runner.Result{}
 	}
 
+	// Write initial plist on PHP 8.4, then switch to 8.5 and verify plist is NOT rewritten
+	_, _ = env.app.Caddy.WriteSite(registry.Entry{Name: "app", Port: "8101", Type: "php", PHP: "8.4", Dir: proj, Docroot: "public"})
+	beforeInfo, _ := os.Stat(env.cfg.PlistPath("app"))
+	beforeBytes, _ := os.ReadFile(env.cfg.PlistPath("app"))
+
 	out, err := env.run("refresh", "app")
 	if err != nil {
 		t.Fatalf("refresh failed: %v\n%s", err, out)
@@ -243,6 +248,10 @@ func TestRefreshSwitchesPHPAndSyncsWorkers(t *testing.T) {
 	e, _ := env.app.Registry.Get("app")
 	if e == nil || e.PHP != "8.5" {
 		t.Fatalf("expected PHP 8.5, got %+v", e)
+	}
+	afterBytes, _ := os.ReadFile(env.cfg.PlistPath("app"))
+	if string(beforeBytes) != string(afterBytes) || beforeInfo == nil {
+		t.Fatalf("site plist should not change on PHP switch (prevents macOS background banners)")
 	}
 	if _, err := os.Stat(env.cfg.PlistPath("app@queue")); err != nil {
 		t.Fatalf("expected worker plist app@queue: %v", err)
@@ -447,16 +456,16 @@ func TestBranchChangeSyncsComposerAndNpm(t *testing.T) {
 		return runner.Result{}
 	}
 
-	// 1. Initial refresh on main: seeds branch state, must NOT run composer/npm, and adds .git/HEAD to watcher plist
+	// 1. Initial refresh on main: seeds branch state, must NOT run composer/npm, and creates single global watcher plist
 	if out, err := env.run("refresh", "shop"); err != nil {
 		t.Fatalf("initial refresh failed: %v\n%s", err, out)
 	}
 	if len(ranCmds) != 0 {
 		t.Fatalf("expected no composer/npm runs on initial seed, got: %v", ranCmds)
 	}
-	plist, _ := os.ReadFile(env.cfg.PlistPath("shop~watch"))
-	if !strings.Contains(string(plist), filepath.Join(gitDir, "HEAD")) {
-		t.Fatalf("expected .git/HEAD in watcher plist:\n%s", string(plist))
+	plist, _ := os.ReadFile(env.cfg.PlistPath("watch"))
+	if !strings.Contains(string(plist), "<string>watch</string>") {
+		t.Fatalf("expected global watcher plist:\n%s", string(plist))
 	}
 
 	// 2. Switch branch to dev: should run composer install, npm install, npm run build AND restart running worker

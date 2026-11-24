@@ -106,12 +106,7 @@ func (a *App) Targets(name string) ([]string, error) {
 	if _, err := a.Registry.RequirePHPSite(name); err != nil {
 		return nil, err
 	}
-	list := append([]string{name}, a.Workers.SiteWorkers(name)...)
-	w := a.Cfg.WatcherName(name)
-	if _, err := os.Stat(a.Cfg.PlistPath(w)); err == nil {
-		list = append(list, w)
-	}
-	return list, nil
+	return append([]string{name}, a.Workers.SiteWorkers(name)...), nil
 }
 
 func (a *App) Control(action, name string) error {
@@ -174,6 +169,7 @@ func (a *App) RefreshSite(name string, force bool) error {
 		from = "composer.json"
 	}
 
+	phpChanged := false
 	if want == "" {
 		a.UI.Warn(fmt.Sprintf("  no .php-version and no config.platform.php in composer.json - staying on PHP %s", entry.PHP))
 		a.Notify(fmt.Sprintf("%s: no .php-version and no config.platform.php in this branch - still on PHP %s.", name, entry.PHP))
@@ -184,6 +180,7 @@ func (a *App) RefreshSite(name string, force bool) error {
 				return err
 			}
 			entry.PHP = want
+			phpChanged = true
 			a.UI.Note(fmt.Sprintf("  PHP %s -> %s (from %s)", oldPHP, want, from))
 			a.Notify(fmt.Sprintf("%s now runs PHP %s (was %s)", name, want, oldPHP))
 		} else {
@@ -199,7 +196,7 @@ func (a *App) RefreshSite(name string, force bool) error {
 	if err := a.Caddy.WriteRoute(name, entry.Port); err != nil {
 		return err
 	}
-	if bounced, err := a.Launchd.Bounce(name, siteChanged, force); err != nil {
+	if bounced, err := a.Launchd.Bounce(name, siteChanged || phpChanged, force); err != nil {
 		return err
 	} else if bounced {
 		a.UI.Note("  restarted " + name)
@@ -213,7 +210,7 @@ func (a *App) RefreshSite(name string, force bool) error {
 		a.UI.Note("  " + ch)
 	}
 
-	if force {
+	if force || phpChanged {
 		for _, w := range a.Workers.SiteWorkers(name) {
 			if bounced, err := a.Launchd.Bounce(w, false, true); err != nil {
 				return err
@@ -390,6 +387,7 @@ func (a *App) RootCmd() *cobra.Command {
 		a.cmdShims(),
 		a.cmdDoctor(),
 		a.cmdSelfUpdate(),
+		a.cmdWatch(),
 	)
 
 	return root
