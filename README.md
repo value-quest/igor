@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/igor-logo.jpg" alt="igor — Service Assistant" width="420">
+</p>
+
 # igor
 
 _Frankenstein's assistant: it serves your PHP projects through FrankenPHP so you don't have to._
