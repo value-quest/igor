@@ -125,6 +125,7 @@ func (u *UI) Select(title string, options []huh.Option[string]) (string, error) 
 	err := huh.NewSelect[string]().
 		Title(title).
 		Options(options...).
+		Filtering(true).
 		Value(&val).
 		Run()
 	return val, err

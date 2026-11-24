@@ -299,7 +299,7 @@ func (a *App) renderUsage() {
   list                      all sites, workers, services and routes with state
   logs <name>               follow a log (<name>:<worker>, or "proxy")
   logs --clear [<name>]     empty one log, or all of them
-  info <name>               URLs and .env hints for internal access
+  info|status [<name>]      URLs, PHP version and .env hints for internal access
   reload                    reload the front proxy config
   install [--check] [--force]
                             install the FrankenPHP suite (every PHP version in
