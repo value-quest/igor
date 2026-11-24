@@ -12,6 +12,7 @@ import (
 	"github.com/value-quest/igor/internal/caddy"
 	"github.com/value-quest/igor/internal/config"
 	"github.com/value-quest/igor/internal/launchd"
+	"github.com/value-quest/igor/internal/notify"
 	"github.com/value-quest/igor/internal/registry"
 	"github.com/value-quest/igor/internal/runner"
 	"github.com/value-quest/igor/internal/runtime"
@@ -70,9 +71,7 @@ func (a *App) Notify(msg string) {
 	if !a.Cfg.IsWatch {
 		return
 	}
-	escaped := strings.ReplaceAll(msg, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-	a.Run.Run("osascript", "-e", fmt.Sprintf(`display notification "%s" with title "igor"`, escaped))
+	notify.Send(a.Cfg.IgorHome, a.Run, msg)
 }
 
 func (a *App) ReloadProxyOrWarn() error {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
+	"github.com/value-quest/igor/internal/notify"
 	"github.com/value-quest/igor/internal/runner"
 )
 
@@ -572,6 +573,7 @@ func (a *App) runRefresh(only string, force bool) error {
 	if err := a.Workers.EnsureGlobalWatcher(); err != nil {
 		return err
 	}
+	_, _ = notify.EnsureAppBundle(a.Cfg.IgorHome, a.Run)
 
 	if err := a.ReloadProxyOrWarn(); err != nil {
 		return err

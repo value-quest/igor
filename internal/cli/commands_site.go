@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/value-quest/igor/internal/config"
 	"github.com/value-quest/igor/internal/launchd"
+	"github.com/value-quest/igor/internal/notify"
 	"github.com/value-quest/igor/internal/registry"
 	"github.com/value-quest/igor/internal/runner"
 )
@@ -114,6 +115,7 @@ func (a *App) cmdSetup() *cobra.Command {
 
 			a.Workers.CleanupLegacyWatchers()
 			_ = a.Workers.EnsureGlobalWatcher()
+			_, _ = notify.EnsureAppBundle(a.Cfg.IgorHome, a.Run)
 
 			a.UI.Info("Creating PHP CLI shims")
 			shims, err := a.Shims.CreateShims()
