@@ -4,7 +4,7 @@
 
 # igor
 
-_Frankenstein's assistant: it serves your PHP projects through FrankenPHP so you don't have to._
+_Frankenstein's assistant: it serves your PHP projects through [FrankenPHP](https://github.com/php/frankenphp) so you don't have to._
 
 Local PHP sites on macOS with the ValueQuest FrankenPHP suite: Laravel, Symfony, WordPress or plain PHP. It replaces Herd with a central Caddy proxy in front of one FrankenPHP backend per app.
 
